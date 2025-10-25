@@ -1,1 +1,927 @@
+******************************************************************************************
+*                                                                                        *
+* Title:          4-Digit Basic Calculator on HCS12 via SCI Serial Communication         *
+*                                                                                        *
+* Objective:      CMPEN 472 Homework #7                                                  *
+*                                                                                        *
+* Revision:       V13.4                                                                  *
+*                                                                                        *
+* Date:	          March 16, 2025                                                         *
+*                                                                                        *
+* Programmer:     Abdullah Bin Jabr                                                      *
+*                                                                                        *
+* Institution:    The Pennsylvania State University                                      *
+*                 Department of Computer Science and Engineering                         *
+*                                                                                        *
+* Functionality:  HyperTerminal receives input from the user                             *
+*                 Command-line calculator utilizing SCI serial communication             *
+*                                                                                        *
+* Algorithm:      Performs fundamental arithmetic operations (+, -, *, /) based on input *
+*                 Prevents overflow and ensures valid user input                         *
+*                 Runs indefinitely without termination                                  *
+*                 Displays "Ecalc >" after each computation                              *
+*                 (Overflows at 2^15) but maintains + and - within 9999                  *
+*                                                                                        *
+* Register Usage: A: Holds serial port data                                              *
+*                 X, Y: Used for arithmetic calculations and loop control                *
+*                 B: Primarily for bitwise operations (masking and calculations)         *
+*                                                                                        *
+* Memory Usage:   Data stored in RAM starting at $3000                                   *
+*                 Program stored in RAM from $3100                                       *
+*                                                                                        *
+* Output:         Displays real-time user input and results upon pressing ENTER in HT    *
+*                 Handles invalid inputs and returns to "Ecalc >"                        *
+*                 Prevents negative results in multiplication and division               *
+*                 Detects and handles division by zero (/0)                              *
+*                                                                                        *
+* Observations:   This program functions as a simple text-based calculator, processing   *
+*                 arithmetic expressions and displaying results via HyperTerminal.       *
+*                 Checks and makes sure no mathematical errors are committed when running*
+*                                                                                        *
+******************************************************************************************
 
+
+******************************************************************************************
+* Parameter Declaration Section                                                             
+* Export Symbols 
+
+      XDEF        pstart          ; export 'pstart' symbol
+      ABSENTRY    pstart          ; for assembly entry point        
+                                                                                             
+* Symbols and Macros
+
+PORTB       EQU         $0001           ; Port B address
+DDRB        EQU         $0003           ; Data Direction Register B
+
+SCIBDH      EQU         $00C8           ; Serial port Baud Register H
+SCIBDL      EQU         $00C9           ; Serial port Baud Register L
+
+SCISR1      EQU         $00CC           ; Serial port Status Register 1
+SCICR2      EQU         $00CB           ; Serial port Control Register 2
+
+SCIDRL      EQU         $00CF           ; Serial port Data Register
+
+SPACE       EQU         $20             ; space " "
+CR          EQU         $0D             ; 'RETURN'
+LF          EQU         $0A             ; 'next line'
+NULL        EQU         $00             ; 'NULL'
+
+*****************************************************************************************
+* Data Section: starting at $3000                         
+*****************************************************************************************
+
+            ORG         $3000           ; Reserved RAM for Data
+
+* Input Management
+FirstStr    DS.B        $0005           ; First number string
+FirstNum    DS.B        $0002           ; First number binary value
+FirstLen    DS.B        $0001           ; First number length
+
+SecondStr   DS.B        $0005           ; Second number string
+SecondNum   DS.B        $0002           ; Second number binary value
+SecondLen   DS.B        $0001           ; Second number length
+
+CalcResult  DS.B        $0002           ; Calculation result
+
+OutBuffer   DS.B        $000A           ; Output formatting buffer
+buffer      DS.B        $000A           ; Input storage buffer (from HW5 and 6)
+
+DigCount    DS.B        $0001           ; Digit count for display
+HexKeyCount DS.B        $0001           ; Hex numeric count
+KeyCount    DS.B        $0001           ; Input key count
+
+* Operation
+MathOp      DS.B        $0001           ; Math operation code
+ErrorState  DS.B        $0001           ; Error state tracker
+
+* Flags and Errors
+MinusFlag   DS.B        $0001           ; Negative result flag
+OverFlag    DS.B        $0001           ; Overflow indicator
+
+errorIn     DC.B    ' Invalid input format', NULL
+errorOvf    DC.B    ' Overflow error', NULL
+
+* Strings:
+CalcPrompt  DC.B    'Ecalc> ', NULL     ; Starts with Ecalc>
+Empty       DC.B    '       ', NULL     ; Used when echoing result
+eq          DC.B    '=', NULL           ; Equal sign in ASCII
+minus       DC.B    '-', NULL           ; Minus signn in ASCII
+
+
+****************************************************************************************
+* Program Section: starting at $3100                                 
+****************************************************************************************
+            ORG         $3100           ; Program start address
+
+****************************************************************************************
+* Main Program and Initializating Hyperterminal
+
+pstart      LDS         #$3100          ; Set stack pointer
+
+            LDAA        #%11111111      ; Set all PORTB pins
+            STAA        DDRB            ; as outputs
+
+            LDAA        #%00000000      ; Clear PORTB 
+            STAA        PORTB           ; all pins low
+
+            LDAA        #$0C            ; Configure SCI
+            STAA        SCICR2          ; enable TX, no interrupts
+            
+            LDD         #$0001          ; Set baud rate
+            STD         SCIBDH          ; 1.5M baud at 24MHz
+            
+            JSR         printMenu       ; Show welcome screen
+ ;main
+            JMP         calcMain        ; Go directly to calculator mode (indefinitely)
+                                        ; TA says no need for a QUIT implementationn
+
+****************************************************************************************
+* Calculator Main subroutine                                                          
+****************************************************************************************                                  
+calcMain        
+            ; Initialize and display prompt
+            PSHX                        ; Save X register
+            LDX         #CalcPrompt     ; Load prompt address
+            JSR         printmsg        ; Display using jump subroutine
+            PULX                        ; Restore X register
+ 
+            ; Set up buffer and clear counters
+            JSR         setupInput      ; Call setup subroutine
+                        
+; Main input processing loop
+readLoop   
+            JSR         captureInput    ; Get and process input
+            LDAA        KeyCount        ; Check if we have enough input
+            CMPA        #$04            ; Need at least 3 chars + Enter
+            LBLO        ErrorH          ; Too short
+            CMPA        #$0A            ; Max 10 characters (4,1,4,1) 
+            LBHI        ErrorH          ; Too long 
+            
+; Process the command            
+            JSR         insertNewline   ; Insert newline after input
+            
+            JSR         CheckInput      ; Check the input
+            LDAA        ErrorState      ; Check for errors
+            CMPA        #$01               
+            LBEQ        ErrorH           ; Handle errors 
+            JSR         processFirstNum  ; Process first number
+            
+            LDAA        ErrorState       ; Check for errors again
+            CMPA        #$01               
+            LBEQ        ErrorH           ; Handle the errors
+            
+            JSR         processSecondNum ; Process second number
+            LDAA        ErrorState       ; Check for errors
+            CMPA        #$01               
+            LBEQ        ErrorH           ; Handle the errors
+            
+            JSR         executeOperation ; Execute the appropriate operation
+            BRA         calcMain         ; Return to start for another calculation
+
+* Setting up the command SRs
+
+setupInput
+            LDX         #buffer          
+            CLR         KeyCount         ; Clear counters
+            CLR         HexKeyCount
+            JSR         clearBuffer      ; Clear buffer
+            LDX         #buffer          ; Reset buffer pointer
+            RTS
+
+captureInput
+            JSR         getchar         
+            CMPA        #$0000          ; Check for no input
+            BEQ         captureInput    ; Wait for input
+            CMPA        #CR             ; Wait for Enter key
+            BEQ         storeInput      ; Process the input
+            JSR         putchar         ; Echo
+storeInput  
+            STAA        1,X+            ; Store X reg content into A and inc
+            INC         KeyCount        ; Count chars
+            CMPA        #CR             ; Wait for ENTERr key
+            BNE         captureInput    ; Continue if not ENTER
+            RTS
+
+insertNewline
+            LDAA        #CR             ; New line after input
+            JSR         putchar            
+            LDAA        #LF             
+            JSR         putchar
+            RTS
+
+processFirstNum
+            LDX         #CalcResult     ; Clear result storage
+            CLR         1,X+
+            CLR         1,X+
+            
+            LDY         #FirstNum           
+            LDX         #FirstStr
+            LDAA        FirstLen
+            STAA        DigCount
+            JSR         toNumber        ; Convert string to number
+            STY         FirstNum
+            
+            RTS
+
+processSecondNum
+            LDX         #CalcResult     ; Clear temp storage
+            CLR         1,X+
+            CLR         1,X+
+            
+            LDY         #SecondNum         
+            LDX         #SecondStr
+            LDAA        SecondLen
+            STAA        DigCount
+            JSR         toNumber        ; Convert string to number
+            STY         SecondNum
+            
+            RTS
+            
+*******************************************************************************            
+* Error Handling
+*******************************************************************************
+
+ErrorH LDAA        #CR             ; New line before error
+            JSR         putchar                  
+            LDAA        #LF             
+            JSR         putchar
+                    
+            LDAA        OverFlag        ; Check error type
+            CMPA        #$01            
+            BEQ         printOverflow   ; Show overflow error
+                  
+            LDX         #errorIn        ; Show invalid input error
+            JSR         printmsg
+            BRA         errorDone
+            
+printOverflow
+            LDX         #errorOvf       ; Show overflow error
+            JSR         printmsg            
+ 
+errorDone   LDAA        #CR             ; New line after error
+            JSR         putchar           
+            LDAA        #LF                                      
+            JSR         putchar
+            CLR         ErrorState      ; Reset error flag
+            CLR         OverFlag        ; Reset overflow flag
+            LBRA        calcMain        ; Return to prompt
+
+overflowError
+            LDAA        #$01            ; Set overflow error
+            STAA        OverFlag
+            LBRA        ErrorH     ; Handle error
+
+showResult  LDX         #eq             ; Show equals sign
+            JSR         printmsg
+
+            LDD         CalcResult      ; Get result
+            JSR         toDisplay       ; Convert to display format
+
+            LDAA        MinusFlag       ; Check if negative
+            CMPA        #$01               
+            BNE         displayNum      
+            LDX         #minus          ; Show minus sign
+            JSR         printmsg
+            
+displayNum  LDX         #OutBuffer      ; Show the result
+            JSR         printmsg
+
+            LDAA        #CR             ; New line after result
+            JSR         putchar            
+            LDAA        #LF
+            JSR         putchar            
+            CLR         MinusFlag       ; Reset negative flag
+            LBRA        calcMain        ; Return to prompt
+***********************************************************************************
+* Execution
+***********************************************************************************            
+executeOperation
+            PSHA                        ; Preserve registers
+            PSHB
+            PSHX
+            
+            LDAA        #$03            ; Initialize error return value 
+            LDAB        MathOp          ; Get operation code
+            CMPB        #$03            ; Check if division (3)
+            BHS         checkDivision   ; Handle division separately
+            
+            CMPB        #$02            ; Check if multiply (2)
+            BHS         checkMultiply   ; Handle multiplication 
+            
+            CMPB        #$01            ; Check if subtract (1)
+            BHS         checkSubtract   ; Handle subtraction
+            
+            CMPB        #$00            ; Check if add (0)
+            BHS         checkAddition   ; Handle addition
+            
+            PULX                        ; Restore registers if no match
+            PULB
+            PULA
+            JMP         ErrorH          ; No valid operation found
+            
+checkDivision
+            PULX                        ; Restore registers
+            PULB
+            PULA
+            JSR         processDivision ; Process division operation
+            JMP         showResult      ; Show the result
+            
+checkMultiply
+            PULX                        ; Restore registers
+            PULB
+            PULA
+            JSR         processMultiply ; Process multiplication
+            JMP         showResult      ; Show the result
+
+checkSubtract
+            PULX                        ; Restore registers
+            PULB
+            PULA
+            JSR         processSubtract ; Process subtraction
+            JMP         showResult      ; Show the result
+            
+checkAddition
+            PULX                        ; Restore registers
+            PULB
+            PULA
+            JSR         processAddition ; Process addition
+            JMP         showResult      ; Show the result
+
+processAddition
+            PSHY                        ; Save Y
+            
+            LDD         SecondNum       ; Load second number first
+            STD         CalcResult      ; Store to result temporarily
+            ; Add first number
+            LDD         FirstNum        
+            ADDD        CalcResult      ; to second number
+            BVS         addOverflow     ; Check for signed overflow
+            
+            
+            STD         CalcResult      ; Store final result
+            PULY                        ; Restore Y
+            RTS
+            
+addOverflow
+            PULY                        ; Restore Y
+            JMP         overflowError   ; Handle overflow
+
+processSubtract
+            PSHY                        ; Save Y
+            
+            ; Determine if result will be positive or negative
+            LDD         SecondNum       ; Load second number
+            CPD         FirstNum        ; Compare second to first (inverted logic)
+            BHS         positiveResult  ; If Second >= First, result is positive with sign
+            
+            ; Normal subtraction (First > Second)
+            LDD         FirstNum        ; Load first number
+            SUBD        SecondNum       ; Subtract second number
+            
+; Check for overflow
+            BVS         subOverflow     ; Check for signed overflow
+            
+            STD         CalcResult      ; Store result
+            CLR         MinusFlag       ; Clear negative flag (result is positive)
+            PULY                        ; Restore Y
+            RTS
+            
+positiveResult
+; Handle subtraction where result is negative
+            LDD         SecondNum       ; Load second number
+            SUBD        FirstNum        ; Subtract first from second
+            
+; Check for overflow
+            BVS         subOverflow     ; Check for signed overflow
+            
+            STD         CalcResult      ; Store result magnitude
+            LDAA        #$01            ; Set negative flag
+            STAA        MinusFlag       ; Mark as negative for display
+            PULY                        ; Restore Y
+            RTS
+            
+subOverflow
+            PULY                        ; Restore Y
+            JMP         overflowError   ; Handle overflow
+
+processMultiply
+            PSHY                        ; Save Y
+            
+            ; Check for arbitrary cases first
+            LDD         FirstNum
+            PSHD                        ; Save first num
+            LDD         SecondNum  
+            PSHD                        ; Save second num
+            
+            CPD         #$0000          ; Check if second num is zero
+            BEQ         zeroMultResult
+
+            PULD                        ; Restore second num
+            PULD                        ; Restore first num
+            LDY         SecondNum       ; Second operand in Y
+            LDD         FirstNum        ; First operand in D
+            EMUL                        ; D   Y ? Y:D
+            
+; Check for overflow
+; First check high word for any non-zero bits
+
+            CPY         #$0000
+            BNE         multiplyOverflow
+            
+; Then check if result is >= 32768 ($8000) - 16-bit signed integer max is 32767
+            CPD         #$8000
+            BHS         multiplyOverflow
+            
+; No overflow? -> complete operation!
+            STD         CalcResult      ; Store result
+            CLR         MinusFlag       ; Ensure no negative flag
+            PULY                        ; Restore Y
+            RTS
+            
+zeroMultResult
+
+; Special case for multiply by zero
+            PULD                        
+            PULD                        
+            LDD         #$0000          ; Set result to zero
+            STD         CalcResult      ; Store result
+            CLR         MinusFlag       ; Ensure no negative flag
+            PULY                        ; Restore Y
+            RTS
+            
+multiplyOverflow
+            PULY                        ; Restore Y
+            LDAA        #$01            ; Set overflow flag
+            STAA        OverFlag
+            JMP         ErrorH          ; Jump to error handler
+
+
+processDivision
+            PSHY                        ; Save Y
+            PSHY                        
+            LDD         SecondNum       ; Get divisor
+            PSHD                        ; Save divisor
+            TST         0,SP            ; Check low byte 
+            BNE         divisorNotZero  ; Not zero in low byte
+            TST         1,SP            ; Check high byte
+            BNE         divisorNotZero  ; Not zero in high byte
+            
+            PULX                        ; Clean stack (divisor)
+            PULY                        ; Clean stack 
+            PULY                        ;
+            JMP         ErrorH          ; Handle error
+            
+divisorNotZero
+            ; Set up division operation
+            
+            PULD                        
+            
+            TFR         D,X             
+            LDD         FirstNum        ; Load dividend
+            IDIV                        ; D   X ? X = quotient, D = remainder
+            TFR         X,D             ; Transfer quotient to D
+            STD         CalcResult      ; Store quotient
+            CLR         MinusFlag       ; Ensure no negative flag
+            
+            PULY                        ; Clean temp space
+            PULY                        ; Restore Y
+            RTS
+
+          
+****************************************************************************************
+* Input Analysis Subroutines
+****************************************************************************************
+CheckInput  
+            PSHD                        ; Save D register
+            PSHY                        ; Save Y register
+            
+            LDX         #Empty          ; Display "           " after ENTER and Ecalc>
+            JSR         printmsg
+            
+            CLR         ErrorState      ; Initialize error state
+            LDX         #buffer         
+            TFR         X,Y             ; Copy buffer pointer 
+            
+            JSR         chFirstNumber   ; Extract First number
+            TST         ErrorState      ; Check for parsing errors
+            BNE         analysisError   ; Skip if error occurred
+            
+            JSR         identifyOperator; Determine operator
+            TST         ErrorState      
+            BNE         analysisError   
+            
+            JSR         chSecondNumber  ; Extract second number
+            TST         ErrorState      
+            BNE         analysisError   
+            
+analysisComplete
+            PULY   ; Restore Y register
+            PULD   ; Restore D register
+            RTS
+            
+analysisError
+            PULY   ; Restore Y register
+            PULD   ; Restore D register
+            RTS
+
+chFirstNumber
+            LDY         #FirstStr       ; Target for first number
+            CLRA                        ; Clear digit counter 
+            TFR         A,B             ; Copy to B
+
+readFirstDigit            
+            LDAA        1,X+            ; Get character from buffer
+            JSR         echo            ; Echo character
+            
+            CMPA        #$30            ; Check if below '0'
+            BLO         firstNumDone    ; Not a digit, must be operator
+            
+            CMPA        #$39            ; Check if above '9'
+            BHI         invalidInput    ; Not a valid digit
+            
+            TFR         B,A             ; Get current count
+            CMPA        #$04            ; Already have 4 digits?
+            BHS         invalidInput    ; Too many digits
+            
+            LDAA        -1,X            ; Retrieve digit again
+            STAA        1,Y+            ; Store in target
+            INCB                        ; Count digit
+            BRA         readFirstDigit  ; Continue reading
+
+firstNumDone
+            TSTB                        ; Check if any digits found
+            BEQ         invalidInput    ; Error if no digits
+            
+            STAB        FirstLen        ; Store length
+            CLR         0,Y             ; Null terminator
+            RTS
+
+identifyOperator
+            LDAB        -1,X            ; Get the operator character
+            
+            CMPB        #$2F            ; First check for division '/'
+            BEQ         setDivision
+            
+            CMPB        #$2A            ; Then check for multiplication '*'
+            BEQ         setMultiplication
+            
+            CMPB        #$2D            ; Then check for subtraction '-'
+            BEQ         setSubtraction
+            
+            CMPB        #$2B            ; Finally check for addition '+'
+            BEQ         setAddition
+            
+            BRA         invalidInput    ; No valid operator found
+            
+setDivision
+            LDAA        #$03            ; Division code
+            STAA        MathOp
+            RTS
+            
+setMultiplication
+            LDAA        #$02            ; Multiplication code
+            STAA        MathOp
+            RTS
+            
+setSubtraction
+            LDAA        #$01            ; Subtraction code
+            STAA        MathOp
+            RTS
+            
+setAddition
+            LDAA        #$00            ; Addition code
+            STAA        MathOp
+            RTS
+
+chSecondNumber
+            LDY         #SecondStr      ; Target for second number
+            CLRB                        ; Clear digit counter
+
+readSecondDigit
+            LDAA        1,X+            ; Get next character
+            JSR         echo            ; Echo character
+            CMPA        #CR             ; Check for end of input
+            
+            BEQ         secondNumDone   ; End of number
+            CMPA        #$30            ; Below '0'?
+            BLO         invalidInput    ; Not a valid digit
+            CMPA        #$39            ; Above '9'?
+            BHI         invalidInput    ; Not a valid digit
+            
+            CMPB        #$04            ; Already have 4 digits?
+            BHS         invalidInput    ; Too many digits
+            
+            STAA        1,Y+            ; Store the digit
+            INCB                        ; Increment counter
+            BRA         readSecondDigit ; Continue reading
+
+secondNumDone
+            TSTB                        ; Check if any digits found
+            BEQ         invalidInput    ; Error if no digits
+            
+            STAB        SecondLen       ; Store length
+            CLR         0,Y             ; Null terminator
+            RTS
+
+
+
+invalidInput
+            LDAA        #$01            ; Set error flag
+            STAA        ErrorState
+            RTS                   
+
+clearBuffer
+            PSHX                        ; Save X register
+            
+            LDAA        #$0A            ; Buffer size 
+            LDAB        #$00            ; Clear value )
+            
+clearNext   
+            TSTA                        ; Check if done
+            BEQ         bufferCleared   ; Exit if counter is zero
+            
+            STAB        1,X+            ; Store null byte
+            DECA                        
+            BRA         clearNext       ; Continue clearing
+            
+bufferCleared
+            PULX                        ; Restore X
+            RTS
+
+****************************************************************************************
+* Number Conversion Routines
+****************************************************************************************
+toNumber    LDAA        0,X             ; Get first character
+            LDAB        DigCount        ; Get digit count
+
+Thousands   CMPB        #$04            ; Four-digit number?
+            BNE         Hundreds        ; Try three digits
+            DEC         DigCount        ; Process thousands place
+            SUBA        #$30            ; ASCII to number
+            LDAB        #10             ; Multiply by 1000 (10*100)
+            MUL                         ; A * 10
+            TFR         B, A            
+            LDAB        #100            ; Second factor
+            MUL                         ; A * 100
+            STD         CalcResult      ; Store result
+            
+            INX                         
+            LDAA        0,X             
+            LDAB        DigCount        ; Update digit count
+                
+Hundreds    CMPB        #$03            ; Three-digit number?
+            BNE         Tens            ; Try two
+                
+            DEC         DigCount        
+            SUBA        #$30            ; ASCII to number
+            LDAB        #100            ; 
+            MUL                         ; A * 100
+            ADDD        CalcResult      
+            STD         CalcResult      ; Store result
+               
+            INX                         
+            LDAA        0,X             
+            LDAB        DigCount        ; Update digit count
+                
+Tens        CMPB        #$02            ; Two-digit number?
+            BNE         Ones            ; Try one digit
+               
+            DEC         DigCount        
+            SUBA        #$30            
+            LDAB        #10             
+            MUL                         ; A * 10
+            ADDD        CalcResult      
+            STD         CalcResult      ; Store result
+               
+            INX                         
+            LDAA        0,X             
+            LDAB        DigCount        ; Update digit count
+                
+Ones        CMPB        #$01            ; One-digit number?
+            BNE         convError       ; if not any of these --> Invalid 
+               
+            DEC         DigCount        
+            SUBA        #$30            
+            LDAB        #1              
+            MUL                         ; A * 1
+            ADDD        CalcResult      
+            STD         CalcResult      ; Final result
+               
+            INX                         ; Update pointer
+            LDY         CalcResult      ; Return result in Y
+            RTS                         
+
+convError   LDAA        #$01            ; Set error flag
+            STAA        ErrorState
+            RTS
+
+toDisplay   CLR         HexKeyCount     ; Clear digit counter
+            CPD         #$0000          ; Check for zero
+            LBEQ        zeroCase        
+                
+* Extract decimal digits
+* Binary to ASCII decimal conversion routine
+* Rearranged with subroutines for digit reversal and conversion
+
+convLoop    LDY         #OutBuffer      ; Result buffer
+divLoop     LDX         #10             ; Divide by 10
+            IDIV                        ; D / 10 -> X remainder B (explained in class)
+            STAB        1,Y+            ; Store remainder (digit)
+            INC         HexKeyCount     ; Count digits
+            TFR         X,D             ; Quotient to D
+            TSTB                        ; Check if done
+            BNE         divLoop         ; Continue if not
+                
+; Reverse and convert to ASCII
+
+reverse     LDAA        HexKeyCount     ; Get digit count
+            CMPA        #$05            ; 5-digit result?
+            LBEQ         dig5
+            CMPA        #$04            ; 4-digit result?
+            LBEQ         dig4
+            CMPA        #$03            ; 3-digit result?
+            LBEQ        dig3
+            CMPA        #$02            ; 2-digit result?
+            LBEQ        dig2
+
+; 1-digit result
+            
+            LDX         #OutBuffer      ; Get buffer
+            LDAA        0,X             ; Get digit
+            ADDA        #$30            ; Convert to ASCII
+            STAA        1,X+            ; Store ASCII digit
+            LDAA        #$00            ; Null terminator
+            STAA        1,X+            ; Terminate string
+            RTS                         ; Done
+
+; Subroutine to reverse digits based on count
+; Input: A = number of digits to reverse
+
+reverseDigits:
+            CMPA        #$05            ; 5 digits?
+            BEQ         rev5
+            CMPA        #$04            ; 4 digits?
+            BEQ         rev4
+            CMPA        #$03            ; 3 digits?
+            BEQ         rev3
+            
+                                        ; So must be 2 digits
+                                        
+                                        
+                                        
+            LDX         #OutBuffer      ; Buffer start
+            LDAA        0,X             ; Get first digit
+            LDAB        1,X             
+            STAB        0,X             ; Swap first and seconnd
+            STAA        1,X
+            BRA         revDone
+            
+rev3:       LDX         #OutBuffer       
+            LDAA        0,X             
+            LDAB        2,X             
+            STAB        0,X             ; Swap first and third
+            STAA        2,X
+            BRA         revDone
+            
+rev4:       LDX         #OutBuffer      
+            LDAA        0,X             
+            LDAB        3,X             
+            STAB        0,X             ; Swap first and fourth
+            STAA        3,X
+            
+            INX                         
+            LDAA        0,X             
+            LDAB        1,X             
+            STAB        0,X             ; Swap second and third
+            STAA        1,X
+            BRA         revDone
+            
+rev5:       LDX         #OutBuffer      
+            LDAA        0,X              
+            LDAB        4,X              
+            STAB        0,X             ; Swap first and fifth
+            STAA        4,X
+            
+            INX                         
+            LDAA        0,X              
+            LDAB        2,X              
+            STAB        0,X             ; Store fourth into second
+            STAA        2,X
+            
+revDone:    RTS                         ; Return
+
+* Convert to ASCII  - expects buffer in X Reg
+
+toASCII     LDAA        HexKeyCount     ; Get digit count
+convASCII   LDAB        0,X             ; Get digit
+            ADDB        #$30            ; Convert to ASCII
+            STAB        1,X+            ; Store ASCII digit
+            DECA                        
+            BNE         convASCII       ; Loop until done
+            LDAB        #$00            
+            STAB        1,X+            ; Terminate string
+            RTS                         
+
+
+dig2        LDAA        #$02            ; 2 digits
+            JSR         reverseDigits   ; Reverse the digits
+            LDX         #OutBuffer      ; Reset buffer pointer
+            JSR         toASCII         
+            RTS                         
+
+
+dig3        LDAA        #$03            ; 3 digits
+            JSR         reverseDigits   ; Reverse the digits
+            LDX         #OutBuffer      ; Reset buffer pointer
+            JSR         toASCII         
+            RTS                         
+
+dig4        LDAA        #$04            ; 4 digits
+            JSR         reverseDigits   ; Reverse the digits
+            LDX         #OutBuffer      ; Reset buffer pointer
+            JSR         toASCII          
+            RTS                         
+
+dig5        LDAA        #$05            ; 5 digits
+            JSR         reverseDigits   ; Reverse digits
+            LDX         #OutBuffer      ; Reset buffer pointer
+            JSR         toASCII          
+            RTS                          
+
+zeroCase    LDX         #OutBuffer      ; Handle zero
+            LDAA        #$30            ; ASCII '0'
+            STAA        1,X+            ; Store digit
+            LDAA        #$00            ; Null
+            STAA        1,X+               
+            RTS
+
+****************************************************************************************
+* Basic I/O Subroutines
+****************************************************************************************
+printmsg    PSHA                        ; Save state of A
+            PSHX                        ; Save state of X
+            
+printLoop   LDAA        1,X+            ; Load character and advance pointer
+            CMPA        #$00            ; Check for null terminator
+            BEQ         printDone       ; Branch if end of string
+            
+            JSR         putchar         ; Print character
+            BRA         printLoop       ; Next  character
+            
+printDone   PULX                        ; Restore X, A regs 
+            PULA
+            RTS
+
+putchar     BRCLR       SCISR1,#%10000000,putchar 
+            STAA        SCIDRL          ; Wait for transmit buffer empty & send
+            RTS
+
+getchar     BRCLR       SCISR1,#%00100000,getcharWait
+            LDAA        SCIDRL          ; Wait for character & load received character
+            RTS
+            
+getcharWait CLRA                        ; Return 0 if no character
+            RTS
+
+echo        CMPA        #CR             ; Check if character is CR (end of string)
+            BEQ         echoDone        ; If CR, return
+            JSR         putchar         
+echoDone    RTS                         
+
+printMenu   LDX         #intro1         ; Welcome message
+            JSR         printmsg
+            LDAA        #CR             ; New line
+            JSR         putchar
+            LDAA        #LF            
+            JSR         putchar
+
+            LDX         #intro2         ; Instructions
+            JSR         printmsg
+            LDAA        #CR
+            JSR         putchar
+            LDAA        #LF
+            JSR         putchar
+            LDAA        #CR             ; Extra line
+            JSR         putchar
+            LDAA        #LF
+            JSR         putchar
+
+            LDX         #intro3         ; Extra input
+            JSR         printmsg
+            LDAA        #CR
+            JSR         putchar
+            LDAA        #LF
+            JSR         putchar
+
+
+            RTS
+
+****************************************************************************************
+* String Constants
+****************************************************************************************
+
+intro1      DC.B    "Welcome to the baby calculator program!", NULL
+intro2      DC.B    "Enter a linear math expression (no spaces) and press ENTER.", NULL
+intro3      DC.B    "Operations are limited to +,-,*,/ with a maximum input of 9999 per, and max of 32767 on result", NULL
+
+            END                         ; End of Program

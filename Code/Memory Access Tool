@@ -1,1 +1,677 @@
+***********************************************************************
+*
+* Title:          SCI Serial Port - Memory Access Program
+*
+* Objective:      CMPEN 472 Homework 6 - Memory Read/Write Program
+*
+* Revision:       V1
+*
+* Date:           March 01, 2025
+*
+* Programmer:     Abdullah Bin Jabr
+*
+* Company:        The Pennsylvania State University
+*                 Department of Computer Science and Engineering
+*
+* Program:        Memory read and write access using SCI Serial Port
+*                 Displays memory contents and allows modifications.
+*                
+*
+* Algorithm:      Simple Serial I/O for reading and writing memory
+*
+* Register use:   A: Serial port data and temporary calculations
+*                 B: Temporary calculations
+*                 X: Memory pointer and loop counter
+*                 D: Combined A and B for 16-bit operations
+*
+* Memory use:     RAM Locations from $3000 for data,
+*                 RAM Locations from $3100 for program
+*
+* Output:         Memory contents in binary, hexadecimal, and decimal
+*
+* Observation:    Reads from and writes to memory via user commands
+***********************************************************************
 
+            XDEF    pstart
+            ABSENTRY pstart
+
+* I/O Registers
+PORTB       EQU     $0001   ; Port B address
+DDRB        EQU     $0003   ; Data Direction Register B
+SCIBDH      EQU     $00C8   ; SCI Baud Register High
+SCIBDL      EQU     $00C9   ; SCI Baud Register Low
+SCICR2      EQU     $00CB   ; SCI Control Register 2
+SCISR1      EQU     $00CC   ; SCI Status Register 1
+SCIDRL      EQU     $00CF   ; SCI Data Register
+
+* ASCII Constants
+CR          EQU     $0D     ; Carriage return (Enter key)
+LF          EQU     $0A     ; Line feed
+NULL        EQU     $00     ; Null terminator
+SPACE       EQU     $20     ; Space character
+PROMPT      EQU     $3E     ; '>' character
+
+* Data Section - Starting at $3000
+            ORG     $3000
+buffer      DS.B    32      ; Buffer for user input (HW5)
+addr_value  DS.W    1       ; Stores extracted memory address (16-bit word)
+data_value  DS.W    1       ; Stores extracted data value (16-bit word)
+temp        DS.W    1       ; Temporary storage for calculations
+cmd_type    DS.B    1       ; Command type (S, W, Q)
+
+* Program Section - Starting at $3100
+            ORG     $3100
+pstart      LDS     #$4000  ; Initialize stack pointer to a safe location
+           
+            ; Initialize SCI port (9600 baud)
+            LDAA    #%00000000  ; Set baud rate registers for 9600 baud
+            STAA    SCIBDH      ; SCI baud rate high byte = 0
+            LDAA    #$01        ; SCI baud rate low byte = 1 for 9600 baud
+            STAA    SCIBDL
+            LDAA    #%00001100  ; 
+            STAA    SCICR2
+           
+            JSR     DisplayMenu   ; Show welcome and instructions
+           
+main_loop   JSR     DisplayPrompt  ; Show command promptt
+            JSR     GetUserInput   ; Read user command
+            JSR     ProcessCommand ; Execute process
+            BRA     main_loop      ; Repeat indefinitely
+
+
+***********************************************************************
+* Display Program Menu - Shows welcome message and instructions
+***********************************************************************
+DisplayMenu
+            LDX     #msgWelcome     ; Load welcome message address
+            JSR     printmsg        ; Print welcome message
+            LDX     #msgCommands    ; Load command explanations
+            JSR     printmsg        ; Print command list
+            RTS
+
+***********************************************************************
+* Display Prompt - Shows the command prompt
+***********************************************************************
+DisplayPrompt
+            LDAA    #CR             ; Carriage return
+            JSR     putchar
+            LDAA    #LF             ; Line feed
+            JSR     putchar
+            LDAA    #PROMPT         ; '>' character
+            JSR     putchar
+            LDAA    #SPACE          ; Space after prompt
+            JSR     putchar
+            RTS
+
+***********************************************************************
+* Get User Input - Reads command from the terminal
+***********************************************************************
+GetUserInput
+            LDX     #buffer         ; Load input buffer pointer to X
+           
+InputLoop   JSR     getchar         ; Get a character from terminal
+            CMPA    #CR             ; Check if Enter pressed
+            BEQ     InputDone       ; If so, finish input
+            JSR     putchar         ; Echo character back to terminal
+           
+            STAA    0,X             ; Store character in buffer
+            INX                     ; Move to next buffer position
+            BRA     InputLoop       ; Continue reading
+           
+InputDone   LDAA    #NULL           ; Get null terminator
+            STAA    0,X             ; Store at end of buffer
+           
+                                    ; Print the new line after input
+            LDAA    #CR
+            JSR     putchar
+            LDAA    #LF
+            JSR     putchar
+           
+            RTS
+
+***********************************************************************
+* Process Command - Identifies command type and executes it
+***********************************************************************
+ProcessCommand
+            LDX     #buffer         ; Point to command buffer
+            LDAA    0,X             ; Get first character (command)
+           
+            ; Store command type for later reference
+            STAA    cmd_type
+           
+            CMPA    #'S'            ; Check if Show command
+            LBEQ    ProcessShow
+           
+            CMPA    #'W'            ; Check if Write command
+            LBEQ    ProcessWrite
+           
+            ; Check for QUIT command (case insensitive)
+            CMPA    #'Q'            ; Check for 'Q'
+            BEQ     QuitCheck1
+           
+            ; Invalid command
+            LDX     #msgInvalid     ; Load error message
+            JSR     printmsg        ; Display error
+            RTS
+           
+QuitCheck1  INX                     ; Move past 'Q'
+            LDAA    0,X
+            CMPA    #'U'            ; Check for 'U'
+            BNE     InvalidCmd      ; If not 'U', invalid command
+           
+            INX                     ; Move past 'U'
+            LDAA    0,X
+            CMPA    #'I'            ; Check for 'I'
+            BNE     InvalidCmd      ; If not 'I', invalid command
+           
+            INX                     ; Move past 'I'
+            LDAA    0,X
+            CMPA    #'T'            ; Check for 'T'
+            BNE     InvalidCmd      ; If not 'T', invalid command
+           
+            JMP     ProcessQuit     ; Valid QUIT command
+           
+InvalidCmd  LDX     #msgInvalid     ; Load invalid command message
+            JSR     printmsg        ; Print error message
+            RTS
+
+***********************************************************************
+* Process Show Command - Displays memory contents
+***********************************************************************
+ProcessShow
+            INX                     ; Move past 'S'
+            LDAA    0,X             ; Get next character
+            CMPA    #'$'            ; Check for $ prefix
+            BNE     InvalidAddr     ; If not $, invalid address
+           
+            INX                     ; Move past '$'
+            JSR     PHexAddr        
+            BCS     InvalidAddr     ; If invalid address, show error
+           
+                                    ; Display memory contents
+            LDX     addr_value      ; Get address
+            JSR     ShowMemory      ; Show memory contents
+            RTS
+           
+InvalidAddr LDX     #msgInvAddr     ; Load invalid address message
+            JSR     printmsg        ; Print error message
+            RTS
+
+***********************************************************************
+* Process Write Command - Writes data to memory
+***********************************************************************
+ProcessWrite
+            INX                     ; Move past 'W'
+            LDAA    0,X             ; Get next character
+            CMPA    #'$'            ; Check for $ prefix
+            BNE     InvalidAddr     ; If not $, invalid address
+           
+            INX                     ; Move past '$'
+            JSR     PHexAddr        
+            BCS     InvalidAddr     ; If invalid address, show error
+           
+                                    ; Find data part (after space)
+            LDX     #buffer         ; Start at beginning of buffer
+FindSpace   LDAA    0,X             ; Get character
+            CMPA    #NULL           ; Check for end of string
+            BEQ     InvalidData     ; If end, no data provided
+            CMPA    #SPACE          ; Check for space
+            BEQ     GotSpace        ; If space, found data separator
+            INX                     ; Next character
+            BRA     FindSpace       ; Continue searching
+           
+GotSpace    INX                     ; Move past space
+           
+                                    ; Skip any additional spaces
+SkipSpaces  LDAA    0,X
+            CMPA    #SPACE
+            BNE     CheckDataType
+            INX                     ; Skip this space
+            BRA     SkipSpaces
+           
+CheckDataType
+            LDAA    0,X             ; Get first data character
+            CMPA    #'$'            ; Check if hex data
+            BEQ     HexData         ; If $, hex data
+           
+                                    ; Decimal data?
+            JSR     PDecData    ; decimal data
+            BCS     InvalidData     ; If invalid, show error
+            BRA     WriteMemory     ; Write to memory
+           
+HexData     INX                     ; Move past '$'
+            JSR     PHexData        
+            BCS     InvalidData     ; If invalid, show error
+           
+WriteMemory LDD     data_value      ; Get data value
+            LDX     addr_value      ; Get address
+            STD     0,X             ; Store data to memory
+           
+            ; Show the updated memory contents
+            JSR     ShowMemory      ; Show memory with new data
+            RTS
+           
+InvalidData LDX     #msgInvData     ; Load invalid data message
+            JSR     printmsg        ; Print error message
+            RTS
+
+***********************************************************************
+* Process Quit Command - Run typewriter program
+***********************************************************************
+ProcessQuit
+            LDX     #msgQuit        ; Load quit message
+            JSR     printmsg        ; Display message
+           
+            ; Implement typewriter functionality
+Typewriter  JSR     getchar         ; Get character from terminal
+            JSR     putchar         ; Echo it back immediately
+            BRA     Typewriter      ; Continue forever
+
+***********************************************************************
+* Conv hex address from buffer at X position
+***********************************************************************
+PHexAddr
+            LDD     #0              ; Initialize address value
+            STD     addr_value      ; Clear address value
+           
+HexAddrLoop LDAA    0,X             ; Get character
+            CMPA    #NULL           ; Check for end of string
+            BEQ     HexAddrDone     ; If end, done
+            CMPA    #SPACE          ; Check for space
+            BEQ     HexAddrDone     ; If space, done
+           
+            ; Check if valid hex character
+            CMPA    #'0'            ; Check if below '0'
+            BLO     HexAddrErr      ; If below '0', error
+            CMPA    #'9'            ; Check if '0'-'9'
+            BLS     HexAddr09       ; If '0'-'9', convert
+           
+            CMPA    #'A'            ; Check if below 'A'
+            BLO     HexAddrErr      ; If below 'A', error
+            CMPA    #'F'            ; Check if above 'F'
+            BHI     HexAddrErr      ; If above 'F', error
+           
+            ; Convert 'A'-'F' to value
+            SUBA    #'A'-10         ; Convert to value (10-15)
+            BRA     HexAddrShift    ; Add to address
+           
+HexAddr09   SUBA    #'0'            ; Convert '0'-'9' to value (0-9)
+           
+HexAddrShift
+            ; Shift address left 4 bits and add new digit
+            PSHA                    ; Save digit
+            LDD     addr_value      ; Get current address
+            LSLD                    ; Shift left 4 bits
+            LSLD
+            LSLD
+            LSLD
+            STD     addr_value      ; Save shifted address
+            PULA                    ; Restore digit
+           
+            ADDA    addr_value+1    ; Add digit to low byte
+            STAA    addr_value+1    ; Store updated address
+           
+            INX                     ; Next character
+            BRA     HexAddrLoop     ; Continue parsing
+           
+HexAddrDone CLC                     ; Clear carry (success)
+            RTS
+           
+HexAddrErr  SEC                     ; Set carry (fail)
+            RTS
+
+***********************************************************************
+* Conv hex data from buffer at X position
+***********************************************************************
+PHexData
+            LDD     #0              ; Initialize data value
+            STD     data_value      ; Clear data value
+           
+HexDataLoop LDAA    0,X             ; Get character
+            CMPA    #NULL           ; Check for end of string
+            BEQ     HexDataDone     ; If end, done
+            CMPA    #SPACE          ; Check for space
+            BEQ     HexDataDone     ; If space, done
+           
+            ; Check if valid hex character
+            CMPA    #'0'            ; Check if below '0'
+            BLO     HexDataErr      ; If below '0', error
+            CMPA    #'9'            ; Check if '0'-'9'
+            BLS     HexData09       ; If '0'-'9', convert
+           
+            CMPA    #'A'            ; Check if below 'A'
+            BLO     HexDataErr      ; If below 'A', error
+            CMPA    #'F'            ; Check if above 'F'
+            BHI     HexDataErr      ; If above 'F', error
+           
+            ; Convert 'A'-'F' to value
+            SUBA    #'A'-10         ; Convert to value (10-15)
+            BRA     HexDataShift    ; Add to data
+           
+HexData09   SUBA    #'0'            ; Convert '0'-'9' to value (0-9)
+           
+HexDataShift
+            ; Shift data left 4 bits and add new digit
+            PSHA                    ; Save digit
+            LDD     data_value      ; Get current data
+            LSLD                    ; Shift left 4 bits
+            LSLD
+            LSLD
+            LSLD
+            STD     data_value      ; Save shifted data
+            PULA                    ; Restore digit
+           
+            ADDA    data_value+1    ; Add digit to low byte
+            STAA    data_value+1    ; Store updated data
+           
+            INX                     ; Next character
+            BRA     HexDataLoop     ; Continue parsing
+           
+HexDataDone CLC                     ; Clear carry (success)
+            RTS
+           
+HexDataErr  SEC                     ; Set carry (error)
+            RTS
+
+***********************************************************************
+* Conv decimal data from buffer at X position
+***********************************************************************
+PDecData
+            LDD     #0              ; Initialize data value
+            STD     data_value      ; Clear data value
+           
+DecDataLoop LDAA    0,X             ; Get character
+            CMPA    #NULL           ; Check for end of string
+            BEQ     DecDataDone     ; If end, done
+            CMPA    #SPACE          ; Check for space
+            BEQ     DecDataDone     ; If space, done
+           
+            ; Check if valid decimal digit
+            CMPA    #'0'            ; Check if below '0'
+            BLO     DecDataErr      ; If below '0', error
+            CMPA    #'9'            ; Check if above '9'
+            BHI     DecDataErr      ; If above '9', error
+           
+            ; Convert digit to value
+            SUBA    #'0'            ; Convert '0'-'9' to value (0-9)
+           
+            ; Multiply current value by 10 and add new digit
+            PSHA                    ; Save digit
+           
+            ; Multiply by 10
+            LDD     data_value      ; Get current value
+            STD     temp            ; Save a copy
+            LSLD                    ; Multiply by 2
+            LSLD                    ; Multiply by 4
+            ADDD    temp            ; Add original (multiply by 5)
+            LSLD                    ; Multiply by 10
+            STD     data_value      ; Save result
+           
+            ; Add digit
+            PULA                    ; Restore digit
+            CLRB                    ; Clear B
+            ADDD    data_value      ; Add to result
+            STD     data_value      ; Store updated value
+           
+            ; Check for overflow
+            BCS     DecDataErr      ; If carry set, overflow occurred
+           
+            INX                     ; Next character
+            BRA     DecDataLoop     ; Continue parsing
+           
+DecDataDone CLC                     ; Clear carry (success)
+            RTS
+           
+DecDataErr  SEC                     ; Set carry (error)
+            RTS
+
+***********************************************************************
+* Show Memory - Displays memory contents in binary, hex, and decimal
+***********************************************************************
+ShowMemory
+            ; Print address
+            LDX     #msgMemAddr     ; Load address message
+            JSR     printmsg        ; Print message
+           
+            LDX     addr_value      ; Get address
+            TFR     X,D             ; Copy to D for printing
+            JSR     PrintHex        ; Print hex address
+           
+            ; Print arrow separator
+            LDX     #msgArrow       ; Load arrow message
+            JSR     printmsg        ; Print arrow
+           
+            ; Print binary
+            LDAA    #'%'            ; Print % for binary
+            JSR     putchar
+           
+            LDX     addr_value      ; Get stored address
+            LDD     0,X             ; Get data from memory
+            STD     data_value      ; Save data value
+            JSR     PrintBinary     ; Print binary representation
+           
+            ; Print hex
+            LDX     #msgSpace       ; Load space message
+            JSR     printmsg        ; Print spaces
+           
+            LDAA    #'$'            ; Print $ for hex
+            JSR     putchar
+           
+            LDD     data_value      ; Get data value
+            JSR     PrintHex        ; Print hex representation
+           
+            ; Print decimal
+            LDX     #msgSpace       ; Load space message
+            JSR     printmsg        ; Print spaces
+           
+            LDD     data_value      ; Get data value
+            JSR     PrintDecimal    ; Print decimal representation
+           
+            ; Print newline
+            LDAA    #CR
+            JSR     putchar
+            LDAA    #LF
+            JSR     putchar
+           
+            RTS
+
+***********************************************************************
+* Print Hex - Outputs 16-bit value in hex format (without $ prefix)
+***********************************************************************
+PrintHex
+            PSHA                    ; Save registers
+            PSHB
+           
+            ; Print high byte
+            TAB                     ; Copy A to B for high nibble
+            LSRB                    ; Shift right 4 bits
+            LSRB
+            LSRB
+            LSRB
+            CLRA                    ; Clear A
+            TBA                     ; Move high nibble to A
+            JSR     PrintHexDigit   ; Print high nibble
+           
+            PULA                    ; Restore A
+            PSHA                    ; Save A again
+            ANDA    #$0F            ; Mask low nibble
+            JSR     PrintHexDigit   ; Print low nibble
+           
+            ; Print low byte
+            PULB                    ; Restore B
+            PSHB                    ; Save B again
+            TBA                     ; Copy B to A for high nibble
+            LSRA                    ; Shift right 4 bits
+            LSRA
+            LSRA
+            LSRA
+            JSR     PrintHexDigit   ; Print high nibble
+           
+            PULB                    ; Restore B
+            TBA                     ; Copy B to A
+            ANDA    #$0F            ; Mask low nibble
+            JSR     PrintHexDigit   ; Print low nibble
+           
+            RTS
+
+***********************************************************************
+* Print Hex Digit - Converts value 0-15 to hex character and prints it
+***********************************************************************
+PrintHexDigit
+            CMPA    #10             ; Compare with 10
+            BLO     HexDigit0to9    ; If less, it's 0-9
+           
+            ; Digit is A-F
+            ADDA    #'A'-10         ; Convert to 'A'-'F'
+            JSR     putchar         ; Print it
+            RTS
+           
+HexDigit0to9
+            ADDA    #'0'            ; Convert to '0'-'9'
+            JSR     putchar         ; Print it
+            RTS
+           
+***********************************************************************
+* Print Binary - Outputs 16-bit value in binary format (without % prefix)
+***********************************************************************
+PrintBinary
+            PSHA                    ; Save registers
+            PSHB
+            PSHX
+           
+            LDX     #16             ; 16 bits to print
+            PSHD                    ; Save data
+           
+BinLoop     PULB                    ; Get low byte
+            PULA                    ; Get high byte
+           
+            LSLA                    ; Shift left, bit to carry
+            ROLB                    ; Roll carry into B
+           
+            PSHA                    ; Save A
+            PSHB                    ; Save B
+           
+            BCC     PrintZero       ; If carry clear, print 0
+            LDAA    #'1'            ; Otherwise, print 1
+            BRA     DoPrintBit
+           
+PrintZero   LDAA    #'0'            ; Print 0
+           
+DoPrintBit  JSR     putchar         ; Print bit
+           
+            DEX                     ; Decrement counter
+            BNE     BinLoop         ; Continue if not done
+           
+            PULB                    ; Clean up stack
+            PULA
+            PULX                    ; Restore X
+            PULB                    ; Restore B
+            PULA                    ; Restore A
+           
+            RTS
+
+***********************************************************************
+* Print Decimal - Outputs 16-bit value in decimal format
+***********************************************************************
+PrintDecimal
+            PSHA                    ; Save registers
+            PSHB
+            PSHX
+           
+            ; Check if zero
+            CPD     #0              ; Compare with zero
+            BNE     DecNonZero      ; If not zero, continue
+           
+            ; Print 0
+            LDAA    #'0'            ; Load '0'
+            JSR     putchar         ; Print it
+            BRA     DecDone         ; Done
+           
+DecNonZero  LDX     #10000          ; Start with highest decimal place
+            JSR     PrintDecDigit   ; Print ten thousands digit
+           
+            LDX     #1000           ; Thousands place
+            JSR     PrintDecDigit   ; Print thousands digit
+           
+            LDX     #100            ; Hundreds place
+            JSR     PrintDecDigit   ; Print hundreds digit
+           
+            LDX     #10             ; Tens place
+            JSR     PrintDecDigit   ; Print tens digit
+           
+            LDX     #1              ; Ones place
+            JSR     PrintDecDigit   ; Print ones digit
+           
+DecDone     PULX                    ; Restore registers
+            PULB
+            PULA
+            RTS
+
+***********************************************************************
+* Print Decimal Digit - Prints one decimal place
+***********************************************************************
+PrintDecDigit
+            PSHD                    ; Save D
+           
+                                    ; D / X = digit in B, remainder in D
+            IDIV                    ; D / X
+            TFR     B,A             ; Move digit to A
+           
+            ADDA    #'0'            ; Convert to ASCII
+            JSR     putchar         ; Print digit
+           
+            PULD                    ; Restore D
+            RTS
+
+***********************************************************************
+* Get Character - Waits for and returns character from SCI
+***********************************************************************
+getchar
+            BRCLR   SCISR1,#%00100000,getchar  ; Wait for RDRF flag
+            LDAA    SCIDRL          ; Read character
+            RTS
+
+***********************************************************************
+* Put Character - Outputs character to SCI
+***********************************************************************
+putchar
+            BRCLR   SCISR1,#%10000000,putchar  ; Wait for TDRE flag
+            STAA    SCIDRL                        ; Send character
+            RTS
+
+***********************************************************************
+* Print Message - Outputs null-terminated string
+***********************************************************************
+printmsg
+            PSHX                    ; Save X
+           
+pmsgLoop    LDAA    0,X             ; Get character
+            CMPA    #NULL           ; Check for end of string
+            BEQ     pmsgDone        ; If end, exit
+           
+            JSR     putchar         ; Output character
+            INX                     ; Move to next character
+            BRA     pmsgLoop        ; Continue
+           
+pmsgDone    PULX                    ; Restore X
+            RTS
+
+***********************************************************************
+* Messages and Constant Strings
+***********************************************************************
+msgWelcome  DC.B    CR,LF,'Welcome to the Simple Memory Access Program!',CR,LF
+            DC.B    'Enter one of the following commands and hit Enter:',CR,LF,NULL
+
+msgCommands DC.B    CR,LF,'S$ADDR        - Show memory contents at ADDR',CR,LF
+            DC.B    'W$ADDR DATA   - Write DATA to memory at ADDR',CR,LF
+            DC.B    'QUIT          - Exit to typewriter mode',CR,LF,NULL
+
+msgInvalid  DC.B    'Invalid command. Try S$ADDR, W$ADDR DATA, or QUIT.',CR,LF,NULL
+msgInvAddr  DC.B    'Invalid address format. Use S$XXXX or W$XXXX.',CR,LF,NULL
+msgInvData  DC.B    'Invalid data format. Use decimal or $XXXX for hex.',CR,LF,NULL
+msgQuit     DC.B    CR,LF,'Type-writing now, hit any keys:',CR,LF,NULL
+msgMemAddr  DC.B    '    $',NULL    
+msgArrow    DC.B    ' => ',NULL      
+msgSpace    DC.B    '    ',NULL      
+
+            END

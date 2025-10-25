@@ -1,1 +1,458 @@
 
+***********************************************************************
+*
+* Title:          SCI Serial Port and 7-segment Display at PORTB
+*
+* Objective:      CMPEN 472 Homework 5
+*                 program
+*
+* Revision:       V3.2  for CodeWarrior 5.2 Debugger Simulation
+*
+* Date:	          Feb. 21, 2025
+*
+* Programmer:     Abdullah Bin Jabr
+*
+* Company:        The Pennsylvania State University
+*                 Department of Computer Science and Engineering
+*
+* Program:        Simple SCI Serial Port I/O and Demonstration
+*                 Typewriter program and 7-Segment display, at PORTB
+*                 
+*
+* Algorithm:      Simple Serial I/O use, typewriter
+*
+* Register use:	  A: Serial port data
+*                 X,Y: Delay loop counters
+*
+* Memory use:     RAM Locations from $3000 for data, 
+*                 RAM Locations from $3100 for program
+*
+* Output:         
+*                 PORTB bit 7 to bit 4, 7-segment MSB
+*                 PORTB bit 3 to bit 0, 7-segment LSB
+*
+* Observation:    This is a typewriter program that displays ASCII
+*                 data on PORTB - 7-segment displays.
+*
+***********************************************************************
+* Parameter Declearation Section
+*
+* Export Symbols
+*
+            XDEF        pstart          ; export 'pstart' symbol
+            ABSENTRY    pstart          ; for assembly entry point        
+*                                                                                             
+* Symbols and Macros
+
+PORTB       EQU         $0001           ; Port B address
+DDRB        EQU         $0003           ; Data Direction Register B
+
+SCIBDH      EQU         $00C8           ; Serial port (SCI) Baud Register H
+SCIBDL      EQU         $00C9           ; Serial port (SCI) Baud Register L
+SCICR2      EQU         $00CB           ; Serial port (SCI) Control Register 2
+SCISR1      EQU         $00CC           ; Serial port (SCI) Status Register 1
+SCIDRL      EQU         $00CF           ; Serial port (SCI) Data Register
+
+
+CR          equ         $0d             ; carriage return, ASCII 'Return' key
+LF          equ         $0a             ; line feed, ASCII 'next line' character
+
+*
+***************************************************************************************************
+* Data Section: address used [ $3000 to $30FF ] RAM memory
+*
+            ORG     $3000               ; Reserved RAM memory starting address
+                                        ; for Data for CMPEN 472 class            
+
+BRIGHTNESS  DS.B        1               ; PWM Brightness Reading for LED 4
+TimeOn      DS.B        1               ; On time counter (0-100)
+TimeOff     DS.B        1               ; Off time counter (0-100)
+
+
+buffer      DS.B        5               ; Buffer for user input
+buffer_sel  DS.B        1               ; Buffer selector
+
+*
+***************************************************************************************************
+* Program Section: address used [ $3100 to $3FFF ] RAM memory                                     
+*
+            ORG         $3100           ; Program start address, in RAM
+pstart      LDS         #$3100          ; initialize the stack pointer
+
+            LDAA        #%11110000      ; LED 1,2,3,4 at PORTB bit 4,5,6,7
+            STAA        DDRB            ; set PORTB bit 4,5,6,7 as output
+
+            LDAA        #%00000000
+            STAA        PORTB           ; clear all bits of PORTB
+
+            LDAA        #$0C            ; Enable SCI transmitter
+            STAA        SCICR2          ; disable SCI interrupts
+            
+            LDD         #$0001          ; Set SCI Baud Register = $0001 => 1.5M baud at 24MHz
+            STD         SCIBDH          ; SCI port baud rate change
+
+            JSR         menu       ; Display menu
+
+main        JSR         InputGet          ; Get user input
+            JSR         InputLoad      ; Execute command
+            BRA         main
+
+*
+**************************************************************************
+* Menu Display subroutine (explained in comments) but basically prints 
+* preliminary messages before user input is even accepted 
+*
+
+menu        LDX         #msgL1           ; Load  message into X
+            JSR         printmsg         ; Send X contents to subrouting printmsg to be printed and shown on terminal
+            
+
+            LDX         #msgF1           ; same here
+            JSR         printmsg         ; Repeat until the display gets all initial messages L1 L2 , ...
+            
+            LDX         #msgL2
+            JSR         printmsg
+            
+            LDX         #msgF2
+            JSR         printmsg
+            
+            LDX         #msgL3
+            JSR         printmsg
+            
+            LDX         #msgF3
+            JSR         printmsg
+            
+
+            LDX         #msgL4
+            JSR         printmsg
+            
+
+            LDX         #msgF4
+            JSR         printmsg
+            
+
+            LDX         #msgQ
+            JSR         printmsg
+           
+            RTS                         ; Go back to the rest of main, return from subroutine
+            
+
+
+***************************************************************************************************
+* InputGet Subroutine is readying user input to be pushed from keyboard to be read by MCU 
+* to be later loaded in the InputLoad SR. Details in every comment
+*
+
+InputGet    CLR         buffer_sel      ; clear entry position
+            LDX         #buffer
+
+InpLoop     JSR         getchar         ; Read char from input buffer
+            CMPA        #$00
+            BEQ         InpLoop         ; If it reads no input
+            JSR         putchar         ; then send back input
+            CMPA        #CR
+            
+            BEQ         InpDone          ; If return key is pressed
+            STAA        1,X+             ; Store in buffer and incX
+            INC         buffer_sel       ; move to next selection position >1
+            BRA         InpLoop
+
+InpDone     CLR         0,X              ; Null into buffer to execute
+            RTS                          ; return to rest of main
+
+***************************************************************************************************
+* InputLoad subroutine                                                                           
+* It compares the user's input in buffer (IN X) to preloaded Y register which matches it to either L1,F1,L2, etc.                  
+* (e.g., "L1", "F1", "L2").  If it sets, it will go to do the user's input (Like JSR to DO_L1 (Turn on LED 1)).
+*
+
+
+
+**************** end of Conrol **************** 
+
+InputLoad:
+        LDX   #buffer          ; First input buffer is loaded into X
+        LDY   #L1              ; Load Y reg with compared value. Check if L1 was the input desired
+        JSR   comparator       ; Compare expected input with the buffer
+        BEQ   Do_L1            ; Do the command if match found, move to F1 if not, then L2, and so on. If no match, flag error message
+
+             
+        LDX   #buffer          ; same for rest and respective inputs
+        LDY   #F1
+        JSR   comparator
+        BEQ   Do_F1
+
+       LDX   #buffer
+       LDY   #L2
+       JSR   comparator
+       BEQ   Do_L2
+
+       LDX   #buffer
+       LDY   #F2
+       JSR   comparator
+       BEQ   Do_F2
+
+       LDX   #buffer
+       LDY   #L3
+       JSR   comparator
+       BEQ   Do_L3
+
+       LDX   #buffer
+       LDY   #F3
+       JSR   comparator
+       BEQ   Do_F3
+
+       LDX   #buffer
+       LDY   #L4
+       JSR   comparator
+       BEQ   Do_L4
+
+       LDX   #buffer
+       LDY   #F4
+       JSR   comparator
+       BEQ   Do_F4
+
+       LDX   #buffer
+       LDY   #Quit
+       JSR   comparator
+       BEQ   Do_Quit
+
+       LDX   #msgEr       ; If no match, flag error message
+       JSR   printmsg
+       RTS                ; return to rest of main loop and reloop to InputGet
+
+*************** Program Execution Part (LED CONTROL and QUIT)
+* Get ready in what to do when User inputs L1 L2 etc
+****
+
+Do_L1        BSET        PORTB, %00010000  ; Turn ON LED1 ONLY when user inputs L1
+             RTS
+Do_L2        BSET        PORTB, %00100000  ; Turn ON LED2 ONLY
+             RTS
+Do_L3        BSET        PORTB, %01000000  ; Turn ON LED3 ONLY
+             RTS
+Do_L4        JSR         DimUp             ; Brighten LED 4 ONLY
+             RTS
+
+Do_F1        BCLR        PORTB, %00010000  ; Turn OFF LED1 ONLY when user inputs F1
+             RTS
+Do_F2        BCLR        PORTB, %00100000  ; Turn OFF LED2 ONLY
+             RTS
+Do_F3        BCLR        PORTB, %01000000  ; Turn OFF LED3 ONLY
+             RTS
+Do_F4        JSR         DimDown           ; DIM LED 4 ONLY
+             RTS
+
+Do_Quit      JMP         TW                ; typewriter mode  (as indicated in HW req)
+;***********printmsg***************************
+;* Program: Output character string to SCI port, print message
+;* Input:   Register X points to ASCII characters in memory
+;* Output:  message printed on the terminal connected to SCI port
+;* 
+;* Registers modified: CCR
+;* Algorithm:
+;     Pick up 1 byte from memory where X register is pointing
+;     Send it out to SCI port
+;     Update X register to point to the next byte
+;     Repeat until the byte data $00 is encountered
+;       (String is terminated with NULL=$00)
+;**********************************************
+NULL           equ     $00
+printmsg       psha                   ;Save registers
+               pshx
+printmsgloop   ldaa    1,X+           ;pick up an ASCII character from string
+                                      ;   pointed by X register
+                                      ;then update the X register to point to
+                                      ;   the next byte
+               cmpa    #NULL
+               beq     printmsgdone   ;end of strint yet?
+               jsr     putchar        ;if not, print character and do next
+               bra     printmsgloop
+
+printmsgdone   pulx 
+               pula
+               rts
+;***********end of printmsg********************
+
+;***************putchar************************
+;* Program: Send one character to SCI port, terminal
+;* Input:   Accumulator A contains an ASCII character, 8bit
+;* Output:  Send one character to SCI port, terminal
+;* Registers modified: CCR
+;* Algorithm:
+;    Wait for transmit buffer become empty
+;      Transmit buffer empty is indicated by TDRE bit
+;      TDRE = 1 : empty - Transmit Data Register Empty, ready to transmit
+;      TDRE = 0 : not empty, transmission in progress
+;**********************************************
+putchar        brclr SCISR1,#%10000000,putchar   ; wait for transmit buffer empty
+               staa  SCIDRL                      ; send a character
+               rts
+;***************end of putchar*****************
+
+;****************getchar***********************
+;* Program: Input one character from SCI port (terminal/keyboard)
+;*             if a character is received, other wise return NULL
+;* Input:   none    
+;* Output:  Accumulator A containing the received ASCII character
+;*          if a character is received.
+;*          Otherwise Accumulator A will contain a NULL character, $00.
+;* Registers modified: CCR
+;* Algorithm:
+;    Check for receive buffer become full
+;      Receive buffer full is indicated by RDRF bit
+;      RDRF = 1 : full - Receive Data Register Full, 1 byte received
+;      RDRF = 0 : not full, 0 byte received
+;**********************************************
+getchar        brclr SCISR1,#%00100000,getchar7
+               ldaa  SCIDRL
+               rts
+getchar7       clra
+               rts
+;****************end of getchar**************** 
+ 
+
+*** Comparing Subroutine **************************
+
+comparator  PSHA
+cmpLoop     LDAA    0,X           ; Load input into X reg
+            CMPA    0,Y           ; Compare it with Y reg saved
+            BNE     NotEqual      ; If they are not the same, branch to not equal 
+            CMPA    #0            ; Check if we reached the end of the line (null)
+            BEQ     Equal         ; If inputs match, go to Equal SR
+            INX                   ; Increment position selector to next string
+            INY                   ; Increment to next input saved
+            BRA     cmpLoop       ; repeat
+Equal       PULA                  ; save reg A contents
+            RTS                   ; return from sr
+NotEqual    PULA                  ; restore A
+            RTS                   ; return to pre comparator branchh
+   
+**************** end of Comapring ****************
+
+**   Typewriter Enable Part ***********************************************
+
+TW  LDX         #msgCom     ; Print The command window message
+    JSR         printmsg
+    LDAA       #%11111111   ; Set PORTB bit 0,1,2,3,4,5,6,7
+    STAA       DDRB         ; as output
+    LDAA       #%00000000
+    STAA       PORTB        ; clear all bits of PORTB   (as needed in tw mode)
+    ldaa       #$0C         ; Enable SCI port Tx and Rx units
+    staa       SCICR2       ; disable SCI interrupts
+    ldd        #$0001       ; Set SCI Baud Register = $0001 => 1.5M baud at 24MHz (for simulation)
+    std        SCIBDH       ; SCI port baud rate change
+
+**************** end of typewriter ****************    
+looop       JSR   getchar            ; type writer - check the key board
+            CMPA  #$00               ;  if nothing typed, keep checking
+            BEQ   looop
+                                       ;  otherwise - what is typed on key board
+            JSR   putchar            ; is displayed on the terminal window - echo print
+            STAA  PORTB              ; show the character on PORTB
+            CMPA  #CR
+            BNE   looop              ; if Enter/Return key is pressed, move the
+            LDAA  #LF                ; cursor to next line
+            JSR   putchar
+            BRA   looop
+
+*** Menu Display ************************************************************************************
+
+msgL1    DC.B     'L1: LED1 On', CR, LF, NULL
+msgF1    DC.B     'F1: LED1 Off', CR, LF, NULL
+msgL2    DC.B     'L2: LED2 On', CR, LF, NULL
+msgF2    DC.B     'F2: LED2 Off', CR, LF, NULL
+msgL3    DC.B     'L3: LED3 On', CR, LF, NULL
+msgF3    DC.B     'F3: LED3 Off', CR, LF, NULL
+msgL4    DC.B     'L4: LED4 Dim Up', CR, LF, NULL
+msgF4    DC.B     'F4: LED4 Dim Down', CR, LF, NULL
+msgQ     DC.B     'QUIT: Typewriter', CR, LF, NULL
+msgCom   DC.B     'Enter your command below: ', CR, LF, NULL
+msgEr    DC.B     'Error: Invalid command', CR, LF, NULL
+
+*** User Inputs *************************************************************************************
+
+L1       DC.B     'L1', NULL
+F1       DC.B     'F1', NULL
+L2       DC.B     'L2', NULL
+F2       DC.B     'F2', NULL
+L3       DC.B     'L3', NULL
+F3       DC.B     'F3', NULL
+L4       DC.B     'L4', NULL
+F4       DC.B     'F4', NULL
+Quit     DC.B     'QUIT', NULL
+**********************************************************************
+* LED 4 Dimming Subroutines
+
+DimUp
+        LDX     #BRIGHTNESS         ; Load brightness storage address into X register
+        CLRA                        ; Clear A register
+        STAA    0,X                 ; Set brightness level to 0
+DimUpLoop
+        BSET    PORTB, %10000000    ; Turn LED 4 ON
+        LDAA    0,X                 ; Load current brightness level
+PWM_ON
+        JSR     delay4ms            ; Apply ON duration
+        DECA                        ; Decrease ON time counter
+        BNE     PWM_ON              ; Loop until ON time reaches zero
+
+        BCLR    PORTB, %10000000    ; Turn LED 4 OFF
+        LDAA    #100                ; Load full brightness value
+        SUBA    0,X                 ; Compute OFF duration
+PWM_OFF
+        JSR     delay4ms            ; Apply OFF duration
+        DECA                        ; Decrease OFF time counter
+        BNE     PWM_OFF              ; Loop until OFF time reaches zero
+
+        LDAA    0,X                 ; Load brightness level
+        INCA                        ; Increment brightness
+        STAA    0,X                 ; Store updated brightness
+        CMPA    #100                ; Check if brightness reached full
+        BNE     DimUpLoop           ; Repeat if not fully bright
+        RTS                         ; Return to main loop
+
+DimDown
+        LDX     #BRIGHTNESS         ; Load brightness storage address
+        LDAA    #100                ; Set brightness to maximum
+        STAA    0,X                 ; Store max brightness level
+DimDownLoop
+        BSET    PORTB, %10000000    ; Turn LED 4 ON
+        LDAA    0,X                 ; Load brightness level
+PWM_ON_D
+        JSR     delay4ms            ; Apply ON duration
+        DECA                        ; Decrease ON time counter
+        BNE     PWM_ON_D            ; Loop until ON time reaches zero
+
+        BCLR    PORTB, %10000000    ; Turn LED 4 OFF
+        LDAA    #100                ; Load max brightness value
+        SUBA    0,X                 ; Compute OFF duration
+PWM_OFF_D
+        JSR     delay4ms            ; Apply OFF duration
+        DECA                        ; Decrease OFF time counter
+        BNE     PWM_OFF_D           ; Loop until OFF time reaches zero
+
+        LDAA    0,X                 ; Load brightness level
+        DECA                        ; Decrease brightness
+        STAA    0,X                 ; Store new brightness level
+        CMPA    #0                  ; Check if brightness is at minimum
+        BNE     DimDownLoop         ; Repeat if brightness is not zero
+        RTS                         ; Return to main loop
+
+**********************************************************************
+* Delay Subroutine: 4ms timing based on CPU cycle calculations
+* Achieves 96,000 cycles using calculated instruction overhead.
+*
+delay4ms
+        PSHX                        ; Save X register state
+        LDX     #240              ; Load cycle count for 4ms delay ** PLEASE USE 200 to observe in better pace*
+ms4loop
+        DEX                         ; Decrement cycle counter
+        BNE     ms4loop             ; Continue looping until zero
+        PULX                        ; Restore X register
+        NOP                         ; Fine-tuning delay accuracy
+        NOP
+        RTS                         ; Return from subroutine
+
+end
+                       
+            END

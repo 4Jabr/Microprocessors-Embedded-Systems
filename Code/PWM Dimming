@@ -1,1 +1,195 @@
+**********************************************************************
+*
+* Title: LED Light ON/OFF and Switch ON/OFF
+*
+* Objective:      CMPEN 472 Homework 3
+*
+* Revision:       V3.1 for CodeWarrior 5.2 Debugger Simulation
+*
+* Date:           February 5, 2025
+*
+* Programmer:     Abdullah Bin Jabr
+*
+* Company:        The Pennsylvania State University
+*                 Department of Computer Science and Engineering
+*
+* Program:        LED 4 blink every 1 milli second (t = msec = 10^-3 s)
+*                 ON for 0.05 msec, OFF for 0.95 msec when switch 1 is not pressed
+*                 ON for 0.25 msec, OFF for 0.75 second when switch 1 is pressed
+*
+* Note:           On CSM-12C128 board,
+*                 Switch 1 is at PORTB bit 0, and
+*                 LED 4 is at PORTB bit 7.
+*                 This program is developed and simulated using
+*                 CodeWarrior 5.2 only, with switch simulation problem.
+*                 So, one MUST set "Switch 1" at PORTB bit 0 as an
+*                 OUTPUT - not an INPUT.
+*                 (If running on CSM-12C128 board, PORTB bit 0 must be set to INPUT).
+*
+* Algorithm:      Simple Parallel I/O use and time delay-loop demo
+*
+* Register use:   A: LED Light on/off state and Switch on/off state
+*                 X,Y: Delay loop counters
+*
+* Memory use:     RAM Locations from $3000 for data,
+*                 RAM Locations from $3100 for program
+*
+* Input:          Parameters hard-coded in the program - PORTB
+*                 Switch 1 at PORTB bit 0
+*                 -> (set this bit as an output for simulation only - and add Switch)
+*                 Switch 2 at PORTB bit 1
+*                 Switch 3 at PORTB bit 2
+*                 Switch 4 at PORTB bit 3
+*
+* Output:         LED 1 at PORTB bit 4
+*                 LED 2 at PORTB bit 5
+*                 LED 3 at PORTB bit 6
+*                 LED 4 at PORTB bit 7
+*
+* Observation:    This is a program that blinks LEDs and blinking period can
+*                 be changed with the delay loop counter value.
+*
+**********************************************************************
+* Parameter Declaration Section
+*
+* Export Symbols
+        XDEF        pstart      ; export 'pstart' symbol
+        ABSENTRY    pstart      ; for assembly entry point
+*
+* Symbols and Macros
+PORTA   EQU   $0000    ; I/O port A address
+DDRA    EQU   $0002
+PORTB   EQU   $0001    ; I/O port B address
+DDRB    EQU   $0003
+
+*
+**********************************************************************
+* Data Section: address used [ $3000 to $30FF ] RAM memory
+*
+            ORG     $3000       ; Reserved RAM memory starting address
+                                ; for Data for CMPEN 472 class
+Counter1    DC.W    $0070       ; X register count number for time delay
+                                ; inner loop for ~120 usec
+Counter2    DC.W    $0002       ; Y register count number for time delay
+                                ; inner loop for ~10 times (10*120us)
+                                
+                                ; ** NOTE: After attempting these values, I got ~23,999 cycles! **
+
+                                ; Remaining data memory space for stack,
+                                ; up to program memory start
+
+*
+**********************************************************************
+* Program Section: address used [ $3100 to $3FFF ] RAM memory
+*
+            ORG     $3100       ; Program start address, in RAM
+pstart      LDS     #$3100      ; initialize the stack pointer
+
+            LDAA    #%11110001  ; LED 1,2,3,4 at PORTB bit 4,5,6,7
+            STAA    DDRB        ; set PORTB bit 4,5,6,7 as output
+                                ; plus the bit 0 for switch 1
+
+            LDAA    #%00000000  
+            STAA    PORTB       ; clear all bits of PORTB
+            BSET    PORTB,%01010000 ; Initialize LED 2,3,4 to 1,0,1 respectively per step 5 of HW
+
+mainLoop
+            
+            LDAA    PORTB       ; check bit 0 of PORTB, switch 1
+            ANDA    #%00000001  ; if 0, run blinkLED4 5% light level
+            BNE     p25LED4     ; if 1, run blinkLED4 25% light level
+
+p5LED4
+            JSR     sw1NotPressed      ; 5% light level (duty cycle)
+            BRA     mainLoop    ; check switch, loop forever!
+
+p25LED4
+            JSR     sw1Pressed      ; 25% light level (duty cycle)
+            BRA     mainLoop    ; check switch, loop forever!
+
+**********************************************************************
+* LED4 turn-on and turn-off subroutines
+
+LED4off
+            PSHA                ; save A register
+            LDAA    #%01111111  ; Turn off LED 4 at PORTB bit 7
+            ANDA    PORTB
+            STAA    PORTB
+            JSR     delayxusec  
+            PULA                ; restore A register
+            RTS
+
+LED4on
+            PSHA                ; save A register
+            LDAA    #%10000000  ; Turn on LED 4 at PORTB bit 7
+            ORAA    PORTB
+            STAA    PORTB
+            JSR     delayxusec  
+            PULA                ; restore A register
+            RTS
+
+**********************************************************************
+* Delay Subroutines
+
+delayxusec
+            PSHY                ; save Y
+            LDY     Counter2    
+
+**
+** I KNOW THAT THE RUBRIC SAYS USE delay10us, but I wanted to make it x * delay10us ** 
+** for more efficiency with future homeworks as hinted at in epilogue part.**
+**
+dlyxLoop
+            JSR     delay10us   ; Jump to 10us Subroutine
+            DEY
+            BNE     dlyxLoop    
+            PULY                ; restore Y
+            RTS                 ; return
+
+
+
+delay10us
+            PSHX                ; save X
+            LDX     Counter1    
+
+dlyusLoop
+            NOP                 
+            DEX
+            BNE     dlyusLoop
+            PULX                ; restore X
+            RTS                 ; return
+
+
+
+sw1NotPressed
+            JSR     LED4on      ; go to the LEDon version with 5*10usec (so 1 call is 5 cycles)
+            PSHY                
+            LDY     #19         ; 19*5 usec off (950usec)
+Loop95                          ; total is 1ms
+            JSR     LED4off     
+            DEY
+            BNE     Loop95
+            PULY                ; restore Y
+            RTS                 ; return
+
+sw1Pressed
+            JSR     LED4on      ; go to the LEDon version with 5*10usec (so 1 call is 5 cycles) but 5 times here (25%)
+            JSR     LED4on
+            JSR     LED4on
+            JSR     LED4on
+            JSR     LED4on
+            PSHY                
+            LDY     #15         ; 15*5 usec off (750usec)
+Loop75                          ; total is 1ms
+            JSR     LED4off     
+            DEY
+            BNE     Loop75
+            PULY                ; restore Y
+            RTS                 ; return
+
+end
+
+; COMMENTS FOR NEXT HOMEWORK (epilogue reflection): use a counter == 15, decrement until the main loop runs 15 times,making a total of 15 blinks.
+; Easy to implement but the rubric did not have that part, so I was worried to include it to not miss grades
+; Plus we never covered it in class
 

@@ -1,1 +1,986 @@
+******************************************************************************************
+*                                                                                        *
+* Title:          Adjustable 24-Hour Clock with 7-Segment Display and User Input         *
+*                                                                                        *
+* Objective:      CMPEN 472 Homework #8                                                  *
+*                                                                                        *
+* Revision:       V3.14                                                                  *
+*                                                                                        *
+* Date:	          March 22, 2025                                                         *
+*                                                                                        *
+* Programmer:     Abdullah Bin Jabr                                                      *
+*                                                                                        *
+* Institution:    The Pennsylvania State University                                      *
+*                 Department of Computer Science and Engineering                         *
+*                                                                                        *
+* Functionality:  Keeps track of time in 24-hour format                                  *
+*                 Lets you set the time and switch display modes using SCI ports         *
+*                 Shows hours, minutes, or seconds on the 7-segment display up to user   *
+*                 You can change the time and pick what part of it you want to see       *              
+*                                                                                        *
+* Algorithm:      Uses RTI interrupts at 2.5ms intervals for timekeeping                 *
+*                 Increments time digits with proper rollover for 24-hour format         *
+*                 Parses user commands with validation ('t', 'h', 'm', 's', 'q')         *
+*                 Converts time digits to Binary Coded Decimal for 7-segment display     *
+*                 Updates both terminal and LED displays at regular intervals            *
+*                                                                                        *
+* Register Usage: A, B: Character processing, ASCII/BCD conversion, and bit manipulation *
+*                 X: Interrupt counter, string pointers, and memory addressing           *
+*                 Y: Buffer navigation during command parsing                            *
+*                 Stack: Preserves registers during subroutine calls                     *
+*                                                                                        *
+* Memory Usage:   Data stored in RAM starting at $3000                                   *
+*                 Program stored in RAM from $3100                                       *
+*                                                                                        *
+* Output:         Terminal displays "Clock> HH:MM:SS" with real-time updates             *
+*                 7-segment LED shows current time component based on display mode       *
+*                 Command feedback and error messages shown on terminal                  *
+*                 Time setting confirmation and mode change indicators                   *
+*                                                                                        *
+* Observations:   Clock maintains time with ~1 second accuracy in simulator              *
+*                 Command interface allows intuitive control of clock functions          *
+*                 Error checking prevents invalid time settings (e.g., 25:61:99)         *
+*                 BCD conversion enables direct display on 7-segment LEDs                *
+*                 Typewriter mode provides an exit path from clock operation             *
+*                                                                                        *
+******************************************************************************************
 
+
+******************************************************************************************
+* Export symbols and ASCII definitions
+******************************************************************************************
+            XDEF        Entry        ; export 'Entry' symbol
+            ABSENTRY    Entry        ; for assembly entry point
+
+; include derivative specific macros
+PORTA       EQU         $0000
+PORTB       EQU         $0001
+DDRA        EQU         $0002
+DDRB        EQU         $0003
+
+SCIBDH      EQU         $00C8        ; Serial port (SCI) Baud Register H
+SCIBDL      EQU         $00C9        ; Serial port (SCI) Baud Register L
+SCICR2      EQU         $00CB        ; Serial port (SCI) Control Register 2
+SCISR1      EQU         $00CC        ; Serial port (SCI) Status Register 1
+SCIDRL      EQU         $00CF        ; Serial port (SCI) Data Register
+
+CRGFLG      EQU         $0037        ; Clock and Reset Generator Flags
+CRGINT      EQU         $0038        ; Clock and Reset Generator Interrupts
+RTICTL      EQU         $003B        ; Real Time Interrupt Control
+
+CR          EQU         $0D          ; carriage return, ASCII 'Return' key
+LF          EQU         $0A          ; line feed, ASCII 'next line' character
+NULL        EQU         $00          ; null terminator
+SPACE       EQU         $20          ; space character
+
+;*******************************************************
+; variable/data section
+            ORG    $3000             ; RAMStart defined as $3000
+                                     ; in MC9S12C128 chip
+
+; Time variables                                     
+hourTens    DS.B   1                 ; Tens digit of hours (0-2)
+hourOnes    DS.B   1                 ; Ones digit of hours (0-9)
+
+minTens     DS.B   1                 ; Tens digit of minutes (0-5)
+minOnes     DS.B   1                 ; Ones digit of minutes (0-9)
+
+secTens     DS.B   1                 ; Tens digit of seconds (0-5) 
+secOnes     DS.B   1                 ; Ones digit of seconds (0-9)
+
+; RTI interrupt counter
+ctr2p5m     DS.W   1                 ; interrupt counter for 2.5 mSec. of time
+
+; Command and display variables
+cmdBuffer   DS.B   12                ; Buffer for command input
+cmdCount    DS.B   1                 ; Character count in command buffer
+inCmd       DS.B   1                 ; Flag: 1 = in command mode, 0 = normal
+cmdEntered  DS.B   1                 ; Flag: 1 = command entered (CR received)
+cmdError    DS.B   1                 ; Flag: 1 = command error detected
+errorMsg    DS.B   1                 ; Error message flag
+displayMode DS.B   1                 ; 0= full time, 1=hour, 2=min, 3= sec
+
+; Input processing variables
+newTime     DS.B   6                 ; Buffer for new time during set operation
+                                     ; Array of [hour tens, hour ones, min tens, min ones, sec tens, sec ones]
+
+;*******************************************************
+; interrupt vector section
+            ORG    $FFF0             ; RTI interrupt vector setup for the simulator
+;            ORG    $3FF0             ; RTI interrupt vector setup for the CSM-12C128 board
+            DC.W   rtiisr
+
+;*******************************************************
+; code section
+
+            ORG    $3100
+Entry
+            LDS    #Entry         ; initialize the stack pointer
+
+            LDAA   #%11111111   ; Set PORTA and PORTB bit 0,1,2,3,4,5,6,7
+            STAA   DDRA         ; all bits of PORTA as output
+            STAA   PORTA        ; set all bits of PORTA, initialize
+            STAA   DDRB         ; all bits of PORTB as output
+            STAA   PORTB        ; set all bits of PORTB, initialize
+
+            LDAA   #$0C         ; Enable SCI port Tx and Rx units
+            STAA   SCICR2       ; disable SCI interrupts
+
+            LDD    #$0001       ; Set SCI Baud Register = $0001 => 1.5M baud at 24MHz (for simulation)
+;            LDD    #$0002       ; Set SCI Baud Register = $0002 => 750K baud at 24MHz
+;            LDD    #$000D       ; Set SCI Baud Register = $000D => 115200 baud at 24MHz
+;            LDD    #$009C       ; Set SCI Baud Register = $009C => 9600 baud at 24MHz
+            STD    SCIBDH       ; SCI port baud rate change
+
+*******************************************************
+* Initialize individual digit variables with ASCII values
+* Corresponding to Clock 00:00:00
+*******************************************************
+            
+            LDAA   #$30             ; ASCII '0' (Store in all digits of clock hh:mm:ss)
+            STAA   hourTens
+            STAA   hourOnes
+            STAA   minTens  
+            STAA   minOnes
+            STAA   secTens
+            STAA   secOnes
+
+            ; Initialize command and display variables
+            CLR    cmdCount         ; Clear command buffer counter
+            CLR    inCmd            ; Not in command mode
+            CLR    cmdEntered       ; No command entered
+            CLR    cmdError         ; No command error
+            CLR    errorMsg         ; No error message
+            CLR    displayMode      ; Default to full time display
+
+            ; Print welcome messages (Located at the end of the code btw)
+            LDX    #welcomeMsg
+            JSR    printmsg
+            JSR    nextline
+            
+            LDX    #instructMsg
+            JSR    printmsg
+            JSR    nextline
+            
+            LDX    #cmdHelpMsg
+            JSR    printmsg
+            JSR    nextline
+            
+            ; Display initial time (00:00:00)
+            JSR    displayTimeOnly
+            
+            ; Initialize Real Time Interrupt
+            BSET   RTICTL,%00011001 ; set RTI: dev=10*(2**10)=2.555msec for C128 board
+                                    ; 4MHz quartz oscillator clock
+            BSET   CRGINT,%10000000 ; enable RTI interrupt
+            BSET   CRGFLG,%10000000 ; clear RTI IF (Interrupt Flag)
+
+            LDX    #0
+            STX    ctr2p5m          ; initialize interrupt counter with 0.
+            CLI                     ; enable interrupt, global
+
+*******************************************************
+* Main program loop
+*******************************************************
+mainLoop    
+            ; Check and update time display if needed
+            JSR    updateDisplay    ; Update display if 1 second has passed
+            
+            ; Check for user input
+            JSR    checkInput       ; Check for keyboard input
+            
+            ; Handle command if entered
+            LDAA   cmdEntered
+            BEQ    mainLoop         ; No command entered, continue loop
+            
+            ; Process entered command
+            JSR    processCommand
+            CLR    cmdEntered       ; Clear command entered flag
+            
+            BRA    mainLoop         ; Continue main loop
+
+;*******************************************************
+; Subroutine section
+;*******************************************************
+
+;***********RTI interrupt service routine***************
+rtiisr      BSET   CRGFLG,%10000000 ; clear RTI Interrupt Flag - for the next one
+            LDX    ctr2p5m          ; every time the RTI occur, increase
+            INX                     ; the 16bit interrupt count
+            STX    ctr2p5m
+            RTI
+;***********end of RTI interrupt service routine********
+
+;***************updateDisplay************************
+; Check if 1 second has passed and update display if needed
+;***************************************************
+updateDisplay
+            PSHA
+            PSHB
+            PSHX
+            
+            ; Check if 1 second has passed
+            LDX    ctr2p5m
+            CPX    #84             ; 2.5msec * 400 approx = 1s freq on chip (but with my pc 84 is closer to that in simulation) was to cause 
+                                    ; a value of 120 seconds approx within 1 second margin of 
+                                    ; error as assignment goals indicate in chip simulator part
+            
+            BLO    doneUpdate       ; Not yet 1 second
+
+            LDX    #0               ; Reset counter
+            STX    ctr2p5m
+
+            ; Update time
+            JSR    incrementTime
+            
+            ; Update display
+            JSR    displayTime
+            
+            ; Update 7-segment LED display
+            JSR    updateLEDDisplay
+
+doneUpdate  PULX
+            PULB
+            PULA
+            RTS
+
+;***************incrementTime************************
+; Increment the time by 1 second
+;***************************************************
+incrementTime
+            PSHA
+            
+            ; Increment seconds
+            LDAA   secOnes          ; Get seconds ones
+            CMPA   #$39             ; Is it '9'?
+            BNE    incSecOnes       ; If not, just increment
+            
+            ; Reset seconds ones and increment seconds tens
+            LDAA   #$30             ; ASCII '0'
+            STAA   secOnes          ; Reset ones
+            
+            LDAA   secTens          ; Get seconds tens
+            CMPA   #$35             ; Is it '5'?
+            BNE    incSecTens       ; If not, just increment
+            
+            ; Reset seconds and increment minutes
+            LDAA   #$30             ; ASCII '0'
+            STAA   secTens          ; Reset tens
+            
+            ; Increment minutes
+            LDAA   minOnes          ; Get minutes ones
+            CMPA   #$39             ; Is it '9'?
+            BNE    incMinOnes       ; If not, just increment
+            
+            ; Reset minutes ones and increment minutes tens
+            LDAA   #$30             ; ASCII '0'
+            STAA   minOnes          ; Reset ones
+            
+            LDAA   minTens          ; Get minutes tens
+            CMPA   #$35             ; Is it '5'?
+            BNE    incMinTens       ; If not, just increment
+            
+            ; Reset minutes and increment hours
+            LDAA   #$30             ; ASCII '0'
+            STAA   minTens          ; Reset tens
+            
+            ; Increment hours
+            LDAA   hourOnes         ; Get hours ones
+            LDAB   hourTens         ; Get hours tens
+            CMPB   #$32             ; Is tens = '2'?
+            BNE    checkHourOnes    ; If not, check ones normally
+            
+            ; Hours tens is 2, check if ones is 3 (23 hours)
+            CMPA   #$33             ; Is ones = '3'?
+            BNE    incHourOnes      ; If not, just increment
+            
+            ; Time is 23:59:59, reset to 00:00:00
+            LDAA   #$30             ; ASCII '0'
+            STAA   hourTens
+            STAA   hourOnes
+            BRA    timeUpdated
+            
+checkHourOnes
+            CMPA   #$39             ; Is it '9'?
+            BNE    incHourOnes      ; If not, just increment
+            
+            ; Reset hours ones and increment hours tens
+            LDAA   #$30             ; ASCII '0'
+            STAA   hourOnes         ; Reset ones
+            
+            ; Increment hours tens
+            LDAA   hourTens
+            INCA
+            STAA   hourTens
+            BRA    timeUpdated
+            
+            ; Increment hours ones
+incHourOnes
+            INCA
+            STAA   hourOnes
+            BRA    timeUpdated
+            
+            ; Increment minute tens
+incMinTens
+            INCA
+            STAA   minTens
+            BRA    timeUpdated
+            
+            ; Increment minute ones
+incMinOnes
+            INCA
+            STAA   minOnes
+            BRA    timeUpdated
+            
+            ; Increment second tens
+incSecTens
+            INCA
+            STAA   secTens
+            BRA    timeUpdated
+            
+            ; Increment second ones
+incSecOnes
+            INCA
+            STAA   secOnes
+            
+timeUpdated
+            PULA
+            RTS
+
+;***************displayTimeOnly**********************
+; Display time without updating it - only for initial display
+; I had an issue where the clock would skip one second on initial
+; Example: 00:00:00 displays 00:00:01
+; This is for safe keeping!
+;**********************************************
+displayTimeOnly
+            PSHA
+            PSHX
+            
+            ; Display "Clock> " prompt
+            LDAA   #CR              ; CR (carriage return)
+            JSR    putchar
+            
+            LDX    #clockPrompt
+            JSR    printmsg
+            
+            ; Display hours
+            LDAA   hourTens
+            JSR    putchar
+            LDAA   hourOnes
+            JSR    putchar
+            
+            ; Display colon
+            LDAA   #$3A             ; ASCII ':'
+            JSR    putchar
+            
+            ; Display minutes
+            LDAA   minTens
+            JSR    putchar
+            LDAA   minOnes
+            JSR    putchar
+            
+            ; Display colon
+            LDAA   #$3A             ; ASCII ':'
+            JSR    putchar
+            
+            ; Display seconds
+            LDAA   secTens          
+            JSR    putchar
+            LDAA   secOnes          
+            JSR    putchar
+            
+            PULX
+            PULA
+            RTS
+
+;***************displayTime************************
+; Display full time with any active command or error message
+;**************************************************
+displayTime
+            PSHA
+            PSHX
+            PSHY
+            
+            JSR nextline
+            ; Display "Clock> " prompt with CR first
+            LDAA   #CR              ; CR (carriage return)
+            JSR    putchar
+            
+            LDX    #clockPrompt
+            JSR    printmsg
+            
+            ; Display hours [tens,ones]
+            LDAA   hourTens
+            JSR    putchar
+            LDAA   hourOnes
+            JSR    putchar
+            
+            ; Display colon
+            LDAA   #$3A             ; ASCII ':'
+            JSR    putchar
+            
+            ; Display minutes [tens,ones]
+            LDAA   minTens
+            JSR    putchar
+            LDAA   minOnes
+            JSR    putchar
+            
+            ; Display colon
+            LDAA   #$3A             ; ASCII ':'
+            JSR    putchar
+            
+            ; Display seconds [tens,ones]
+            LDAA   secTens          
+            JSR    putchar
+            LDAA   secOnes          
+            JSR    putchar
+            
+            ; Display command if active
+            LDAA   inCmd
+            BEQ    checkError       ; If not in command, check for error
+            
+            ; Display command prompt and buffer
+            LDX    #cmdPrompt
+            JSR    printmsg
+            
+            ; Display command buffer
+            LDAA   cmdCount
+            BEQ    checkError       ; If empty, check for error
+            
+            LDY    #cmdBuffer
+            LDAB   cmdCount        ; Copy count to B to preserve it
+displayCmd  LDAA   0,Y             ; Get character from buffer
+            JSR    putchar         ; Display it
+            INY                    ; Next character
+            DECB                   ; Decrement temporary count
+            BNE    displayCmd      ; Continue if more characters
+                        
+checkError  ; Display error message if active
+            LDAA   errorMsg
+            BEQ    displayDone     ; No error
+            
+            ; Display error prompt and message
+            LDX    #errorPrompt
+            JSR    printmsg
+            
+            LDX    #invalidMsg
+            JSR    printmsg
+            
+            CLR    errorMsg        ; Clear error flag
+            
+displayDone PULY                   ; Restore
+            PULX
+            PULA
+            RTS
+;***************bufferLimitCheck************************
+; Check if the command buffer is at capacity and set error if needed
+; Input: None (uses cmdCount from memory)
+; Output: Register A = 0 if buffer OK, 1 if buffer full/nearly full
+;**************************************************
+bufferLimitCheck
+            PSHA                   ; Save original A
+            
+            LDAA   cmdCount        ; Get current character count
+            CMPA   #12             ; Check if buffer is almost full (12-1 for final char + null)
+            BLO    bufferOK        ; If below 10, buffer still has space
+            
+            ; Buffer is at or near capacity, set error flag
+            PULA                   ; Restore original A
+            LDAA   #1              ; Return 1 to indicate buffer full
+            STAA   errorMsg        ; Set error message flag
+            RTS
+            
+bufferOK    PULA                   ; Restore original A
+            CLRA                   ; Return 0 to indicate buffer OK
+            RTS
+            
+;***************checkInput************************
+; Check for keyboard input and handle it
+;**************************************************
+checkInput
+            PSHA                  ; Save
+            PSHX
+            
+            JSR    getchar        ; Check for input
+            CMPA   #0             ; No input?
+            BEQ    inputDone      ; Done if no input
+            
+            ; Handle command start if not already in command mode
+            LDAB   inCmd
+            BNE    handleInput    ; Already in command mode
+            
+            ; Start command mode
+            LDAB   #1
+            STAB   inCmd
+            
+            ; Initialize command buffer
+            LDX    #cmdBuffer
+            CLR    0,X            ; Clear first byte
+            CLR    cmdCount       ; Clear command count
+            
+handleInput CMPA   #CR            ; Check for Enter key
+            BEQ    enterPressed
+            
+            ; Check buffer capacity before adding
+            PSHA                  ; Save character
+            JSR    bufferLimitCheck
+            TSTA                  ; Test result (0=OK, 1=full)
+            BNE    bufferFull     ; If buffer full, don't add character
+            PULA                  ; Restore character if buffer OK
+            
+            ; Add character to buffer
+            LDX    #cmdBuffer
+            LDAB   cmdCount       ; Get current count
+            ABX                   ; Add to pointer
+            STAA   0,X            ; Store character
+            CLR    1,X            ; Null terminate
+            INC    cmdCount       ; Increment count
+            BRA    inputDone
+            
+bufferFull  PULA                  ; Discard saved character (buffer full)
+            BRA    inputDone      ; Skip adding character
+            
+enterPressed
+            ; Set command entered flag to non-zero value
+            LDAA   #1
+            STAA   cmdEntered
+            
+            ; Instead of just echoing the CR character, use nextline subroutine
+            ; which properly handles CR+LF combination
+            LDAA   CR
+            JSR    putchar
+            
+inputDone   PULX
+            PULA
+            RTS
+
+;***************processCommand************************
+; Process the entered command
+;**************************************************
+processCommand
+            PSHA
+            PSHB
+            PSHX
+            PSHY
+            
+            ; Check if command buffer is empty
+            LDAA   cmdCount
+            lBEQ    cmdDone        ; Empty command, do nothing
+            
+            ; Check first character of command
+            LDX    #cmdBuffer
+            LDAA   0,X            ; Get first character
+            
+            ; Convert to lowercase if uppercase
+            CMPA   #'A'           ; Check if uppercase
+            lBLO    checkCommand   ; Not a letter
+            CMPA   #'Z'
+            lBHI    checkCommand   ; Not uppercase
+            ADDA   #$20           ; Convert to lowercase
+            STAA   0,X            ; Store back
+            
+checkCommand
+            
+            CMPA   #'t'           ; Set time command?
+            lBEQ    setTimeCmd
+            
+            CMPA   #'q'           ; Quit command?
+            lBEQ    quitCmd
+            
+            CMPA   #'h'           ; Hour display command?
+            lBEQ    hourDisplayCmd
+            
+            CMPA   #'m'           ; Minute display command?
+            lBEQ    minDisplayCmd
+            
+            CMPA   #'s'           ; Second display command?
+            lBEQ    secDisplayCmd
+            
+            ; Invalid command
+            LDAA   #1
+            STAA   errorMsg       ; Set error flag
+            lBRA    cmdCleanup
+            
+setTimeCmd  ; Process set time command
+            ; Format: t HH:MM:SS
+            ; Check if command has at least 9 characters (t HH:MM:SS)
+            LDAA   cmdCount
+            CMPA   #9
+            lBLO    invalidCmd     ; Too short
+            
+            LDY    #cmdBuffer
+            INY                   ; Skip 't'
+            
+            ; Check if there's a space after 't'
+            LDAA   0,Y
+            CMPA   #SPACE
+            lBNE    invalidCmd     ; No space
+            INY                   ; Skip space
+            
+            ; Parse hours tens digit
+            LDAA   0,Y
+            CMPA   #'0'
+            lBLO    invalidCmd     ; Below '0'
+            CMPA   #'2'
+            lBHI    invalidCmd     ; Above '2'
+            STAA   newTime        ; Store hours tens
+            INY
+            
+            ; Parse hours ones digit
+            LDAA   0,Y
+            CMPA   #'0'
+            lBLO    invalidCmd     ; Below '0'
+            CMPA   #'9'
+            lBHI    invalidCmd     ; Above '9'
+            
+            ; Check if hours is valid (00-23)
+            LDAB   newTime        ; Get hours tens
+            CMPB   #'2'
+            lBNE    storeHoursOnes ; If not 2, any ones digit is valid
+            
+            ; Hours tens is 2, ones must be 0-3
+            CMPA   #'4'
+            lBHS    invalidCmd     ; Invalid if >= 4
+            
+storeHoursOnes
+            STAA   newTime+1      ; Store hours ones
+            INY
+            
+            ; Check for colon
+            LDAA   0,Y
+            CMPA   #':'
+            lBNE    invalidCmd     ; Not a colon
+            INY
+            
+            ; Parse minutes tens digit
+            LDAA   0,Y
+            CMPA   #'0'
+            lBLO    invalidCmd     ; Below '0'
+            CMPA   #'5'
+            lBHI    invalidCmd     ; Above '5'
+            STAA   newTime+2      ; Store minutes tens
+            INY
+            
+            ; Parse minutes ones digit
+            LDAA   0,Y
+            CMPA   #'0'
+            lBLO    invalidCmd     ; Below '0'
+            CMPA   #'9'
+            lBHI    invalidCmd     ; Above '9'
+            STAA   newTime+3      ; Store minutes ones
+            INY
+            
+            ; Check for second colon (optional for shorter commands)
+            LDAA   0,Y
+            CMPA   #0            ; End of string?
+            lBEQ    setTimeWithDefaults ; Use default seconds
+            CMPA   #':'
+            lBNE    invalidCmd     ; Not a colon
+            INY
+            
+            ; Parse seconds tens digit
+            LDAA   0,Y
+            CMPA   #'0'
+            lBLO    invalidCmd     ; Below '0'
+            CMPA   #'5'
+            lBHI    invalidCmd     ; Above '5'
+            STAA   newTime+4      ; Store seconds tens
+            INY
+            
+            ; Parse seconds ones digit
+            LDAA   0,Y
+            CMPA   #'0'
+            lBLO    invalidCmd    ; Below '0'
+            CMPA   #'9'
+            lBHI    invalidCmd    ; Above '9'
+            STAA   newTime+5      ; Store seconds ones
+            INY                   ; Move to next character after seconds ones digit
+
+            ; Now check if there are any extra characters
+            LDAA   0,Y            ; Get the character after seconds ones
+            CMPA   #NULL          ; Should be null terminator
+            lBNE    invalidCmd    ; If not null, invalid format (extra characters) 
+                       
+setTimeNow  ; Set new time
+            LDAA   newTime        ; Uses digit selection hhmmss (1-->6)
+            STAA   hourTens       ; 1
+            LDAA   newTime+1
+            STAA   hourOnes       ; 2
+            LDAA   newTime+2
+            STAA   minTens        ; 3
+            LDAA   newTime+3
+            STAA   minOnes        ; 4
+            LDAA   newTime+4
+            STAA   secTens        ; 5
+            LDAA   newTime+5
+            STAA   secOnes        ; Finalize
+            
+            ; Reset counter to ensure a clean state
+            LDX    #0
+            STX    ctr2p5m
+            
+            BRA    cmdCleanup
+            
+setTimeWithDefaults
+            ; Set time with default seconds (00)
+            LDAA   newTime
+            STAA   hourTens       ; Used for special case handling and later for HW9. I presume
+            LDAA   newTime+1
+            STAA   hourOnes                                             ;(same as above)
+            LDAA   newTime+2
+            STAA   minTens                                              ;(same as above)
+            LDAA   newTime+3
+            STAA   minOnes
+            LDAA   #'0'                                                 ;(same as above)
+            STAA   secTens
+            STAA   secOnes
+            STAA   newTime+4      ; Store in case we need to refer to it (same as above)
+            STAA   newTime+5      ; Store in case we need to refer to it (same as above)
+            
+            ; Reset counter to ensure a clean state
+            LDX    #0
+            STX    ctr2p5m
+            
+            BRA    cmdCleanup
+            
+quitCmd     ; Process quit command
+            ; Display quit message
+            JSR    nextline
+            LDX    #quitMsg
+            JSR    printmsg
+            JSR    nextline
+            
+            ; Return to typewriter mode
+            LDX    #typewriterMsg
+            JSR    printmsg
+            JSR    nextline
+            
+            ; Enter infinite typewriter loop
+typeLoop    JSR    getchar        ; Get character
+            TSTA                  ; Test if character received
+            BEQ    typeLoop       ; If not, continue
+            JSR    putchar        ; Echo character
+            BRA    typeLoop       ; Continue loop
+            
+hourDisplayCmd
+            ; Set display mode to hours
+            LDAA   #1
+            STAA   displayMode
+            BRA    cmdCleanup
+            
+minDisplayCmd
+            ; Set display mode to minutes
+            LDAA   #2
+            STAA   displayMode
+            BRA    cmdCleanup
+            
+secDisplayCmd
+            ; Set display mode to seconds
+            LDAA   #3
+            STAA   displayMode
+            BRA    cmdCleanup
+            
+invalidCmd  ; Handle invalid command
+            LDAA   #1
+            STAA   errorMsg       ; Set error flag
+            
+cmdCleanup  ; Clear command buffer and flags
+            CLR    inCmd          ; Clear command mode
+            LDX    #cmdBuffer
+            CLR    0,X            ; Clear first byte
+            CLR    cmdCount       ; Clear command count
+            JSR    displayTime    ; Force immediate display update
+            
+cmdDone     PULY
+            PULX
+            PULB
+            PULA
+            RTS
+
+;***************updateLEDDisplay************************
+; Update 7-segment LED display based on current mode
+;******************************************************
+updateLEDDisplay
+            PSHA
+            
+            LDAA   displayMode    ; Get current display mode
+            BEQ    displayFullTime ; Mode 0: full time (default to hours)
+            CMPA   #1
+            BEQ    displayHours   ; Mode 1: hours
+            CMPA   #2
+            BEQ    displayMinutes ; Mode 2: minutes
+            CMPA   #3
+            BEQ    displaySeconds ; Mode 3: seconds
+            
+            ; Default to full time
+displayFullTime
+
+displayHours
+    ; Display hours on PORTB using direct BCD representation
+            ; Display hours on PORTB using direct BCD representation
+            LDAA   hourTens
+            SUBA   #'0'            ; Convert from ASCII to number (0-2)
+            LSLA                   ; Shift left 4 times to move to upper nibble
+            LSLA
+            LSLA
+            LSLA
+            TAB                    ; Store in B temporarily    
+    LDAA   hourOnes
+    SUBA   #'0'            ; Convert from ASCII to number (0-9)
+    ABA                    ; Combine with tens digit (now in upper 4 bits)
+    
+    STAA   PORTB          ; Output to PORTB
+    BRA    ledDisplayDone
+            
+displayMinutes
+            ; Display minutes on PORTB using direct BCD representation
+            LDAA   minTens
+            SUBA   #'0'            ; Convert from ASCII to number (0-5)
+            LSLA                   ; Shift left 4 times to move to upper nibble
+            LSLA
+            LSLA
+            LSLA
+            TAB                    ; Store in B temporarily            
+            LDAA   minOnes
+            SUBA   #'0'            ; Convert from ASCII to number (0-9)
+            ABA                    ; Combine with tens digit (now in upper 4 bits)
+            
+            STAA   PORTB           ; Output to PORTB
+            BRA    ledDisplayDone
+            
+displaySeconds
+            ; Display seconds on PORTB using direct BCD representation
+            ; Display seconds on PORTB using direct BCD representation
+            LDAA   secTens
+            SUBA   #'0'            ; Convert from ASCII to number (0-5)
+            LSLA                   ; Shift left 4 times to move to upper nibble
+            LSLA
+            LSLA
+            LSLA
+            TAB                    ; Store in B temporarily            
+            LDAA   secOnes
+            SUBA   #'0'            ; Convert from ASCII to number (0-9)
+            ABA                    ; Combine with tens digit (now in upper 4 bits)
+            
+            STAA   PORTB           ; Output to PORTB
+            
+ledDisplayDone
+            PULA
+            RTS
+
+;***************asciiTo7Seg************************
+; Convert ASCII digit to 7-segment display pattern
+; Input: ASCII digit in A
+; Output: 7-segment pattern in A (low 4 bits)
+;**************************************************
+asciiTo7Seg
+            PSHB
+            PSHX
+            
+            SUBA   #'0'           ; Convert from ASCII to number (0-9)
+            TAB                   ; Copy to B
+            LDX    #segPatterns   ; Get pattern table
+            ABX                   ; Add offset
+            LDAA   0,X            ; Get pattern
+            
+            PULX
+            PULB
+            RTS
+
+;***********printmsg***************************
+;* Program: Output character string to SCI port, print message
+;* Input:   Register X points to ASCII characters in memory
+;* Output:  message printed on the terminal connected to SCI port
+;* 
+;* Registers modified: CCR
+;* Algorithm:
+;     Pick up 1 byte from memory where X register is pointing
+;     Send it out to SCI port
+;     Update X register to point to the next byte
+;     Repeat until the byte data $00 is encountered
+;       (String is terminated with NULL=$00)
+;**********************************************
+printmsg    PSHA                   ;Save registers
+            PSHX
+printmsgloop LDAA   1,X+           ;pick up an ASCII character from string
+                                   ;   pointed by X register
+                                   ;then update the X register to point to
+                                   ;   the next byte
+            CMPA   #NULL
+            BEQ    printmsgdone   ;end of string yet?
+            BSR    putchar        ;if not, print character and do next
+            BRA    printmsgloop
+printmsgdone PULX 
+            PULA
+            RTS
+;***********end of printmsg********************
+
+;***************putchar************************
+;* Program: Send one character to SCI port, terminal
+;* Input:   Accumulator A contains an ASCII character, 8bit
+;* Output:  Send one character to SCI port, terminal
+;* Registers modified: CCR
+;* Algorithm:
+;    Wait for transmit buffer become empty
+;      Transmit buffer empty is indicated by TDRE bit
+;      TDRE = 1 : empty - Transmit Data Register Empty, ready to transmit
+;      TDRE = 0 : not empty, transmission in progress
+;**********************************************
+putchar     BRCLR SCISR1,#%10000000,putchar   ; wait for transmit buffer empty
+            STAA  SCIDRL                      ; send a character
+            RTS
+;***************end of putchar*****************
+
+;****************getchar***********************
+;* Program: Input one character from SCI port (terminal/keyboard)
+;*             if a character is received, other wise return NULL
+;* Input:   none    
+;* Output:  Accumulator A containing the received ASCII character
+;*          if a character is received.
+;*          Otherwise Accumulator A will contain a NULL character, $00.
+;* Registers modified: CCR
+;* Algorithm:
+;    Check for receive buffer become full
+;      Receive buffer full is indicated by RDRF bit
+;      RDRF = 1 : full - Receive Data Register Full, 1 byte received
+;      RDRF = 0 : not full, 0 byte received
+;**********************************************
+getchar     BRCLR SCISR1,#%00100000,getchar7
+            LDAA  SCIDRL
+            RTS
+getchar7    CLRA
+            RTS
+;****************end of getchar**************** 
+
+;****************nextline**********************
+nextline    PSHA
+            LDAA  #CR              ; move the cursor to beginning of the line
+            JSR   putchar          ;   Cariage Return/Enter key
+            LDAA  #LF              ; move the cursor to next line, Line Feed
+            JSR   putchar
+            PULA
+            RTS
+;****************end of nextline***************
+
+;*******************************************************
+; Data constants
+;*******************************************************
+
+; 7-segment display patterns for digits 0-9
+; For common anode displays - 0 = segment on, 1 = segment off
+segPatterns DC.B   $00,$01,$02,$03,$04,$05,$06,$07,$08,$09
+
+; Messages
+welcomeMsg  DC.B   'Digital Clock Program - CMPEN 472', $00
+instructMsg DC.B   '24-hour Clock with Command Interface', $00
+cmdHelpMsg  DC.B   'Commands: t HH:MM:SS (set time), h (show hours), m (minutes), s (seconds), q (quit)', $00
+clockPrompt DC.B   'Clock> ', $00
+cmdPrompt   DC.B   '     CMD> ', $00
+errorPrompt DC.B   '     Error> ', $00
+invalidMsg  DC.B   'Invalid input', $00
+quitMsg     DC.B   'Clock stopped and Typewriter program started.', $00
+typewriterMsg DC.B  'You may type below.', $00
+
+; So many variables and symbols were reused from HW7 to later incoporate it into HW9. If some subroutines did change from sample, that is why!
+            END
